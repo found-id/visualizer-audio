@@ -389,12 +389,46 @@ body {
 }
 
 .lyrics-controls-drawer {
-  padding: 10px 14px;
+  flex-shrink: 0;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--ui-border);
   background: var(--ui-surface);
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
+  max-height: 55%;
+  overflow-y: auto;
+}
+
+.icon-btn.overlay-active,
+.btn.overlay-active {
+  background: var(--ui-accent) !important;
+  color: var(--ui-accent-text) !important;
+  border-color: var(--ui-accent) !important;
+  box-shadow: 0 0 14px rgba(99, 102, 241, 0.35);
+}
+
+/* Transparent Web/OBS Overlay Mode (?overlay=1) */
+html.transparent-web-overlay,
+html.transparent-web-overlay body {
+  background: transparent !important;
+}
+
+html.transparent-web-overlay #visualizer,
+html.transparent-web-overlay #hud,
+html.transparent-web-overlay #studio-panel,
+html.transparent-web-overlay #lyrics-panel,
+html.transparent-web-overlay #empty-state {
+  display: none !important;
+}
+
+html.transparent-web-overlay #lyrics-cinema {
+  display: flex !important;
+  bottom: 42px;
+  text-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.96),
+    0 0 18px rgba(0, 0, 0, 0.92),
+    1px 1px 0 rgba(0, 0, 0, 0.9);
 }
 
 .lyric-offset-bar {
@@ -405,6 +439,7 @@ body {
 }
 
 .lyrics-search-bar {
+  flex-shrink: 0;
   display: flex;
   gap: 6px;
   padding: 8px 12px;
@@ -518,6 +553,7 @@ body {
 }
 
 .panel-header {
+  flex-shrink: 0;
   display: flex;
   align-items: center;
   justify-content: space-between;

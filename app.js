@@ -2,8 +2,14 @@
   const BRIDGE_MEDIA_URL = 'http://127.0.0.1:19847';
   const BRIDGE_AUDIO_URL = 'http://127.0.0.1:19848';
 
+  const urlParams = new URLSearchParams(window.location.search);
+  const isWebOverlayMode = urlParams.get('overlay') === '1';
+  if (isWebOverlayMode) {
+    document.documentElement.classList.add('transparent-web-overlay');
+  }
+
   const canvas = document.getElementById('visualizer');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx = canvas.getContext('2d', { alpha: isWebOverlayMode });
 
   const emptyState = document.getElementById('empty-state');
   const errorBanner = document.getElementById('error-banner');
@@ -50,6 +56,13 @@
   const btnLyricOffsetPlus = document.getElementById('btn-lyric-offset-plus');
   const lyricOffsetVal = document.getElementById('lyric-offset-val');
   const btnLyricsCinemaToggle = document.getElementById('btn-lyrics-cinema-toggle');
+  const btnGameOverlay = document.getElementById('btn-game-overlay');
+  const btnHudOverlay = document.getElementById('btn-hud-overlay');
+  const btnVisPower = document.getElementById('btn-vis-power');
+  const visEnabledToggle = document.getElementById('vis-enabled-toggle');
+  const overlayPosSelect = document.getElementById('overlay-pos-select');
+  const overlayPrevNextToggle = document.getElementById('overlay-prevnext-toggle');
+  const overlayClickThroughToggle = document.getElementById('overlay-clickthrough-toggle');
   const ecoModeToggle = document.getElementById('eco-mode-toggle');
 
   // Source & Studio Buttons
@@ -161,6 +174,8 @@
     ['lg-bevel-slider', 'lg-bevel-num'],
     ['lyric-scale-slider', 'lyric-scale-num'],
     ['lyric-dof-slider', 'lyric-dof-num'],
+    ['overlay-scale-slider', 'overlay-scale-num'],
+    ['overlay-opacity-slider', 'overlay-opacity-num'],
     ['dpr-slider', 'dpr-num'],
   ];
 
@@ -280,6 +295,7 @@
   let customBgImage = null;
   let customBgImageSrc = '';
   let coverBgImage = null;
+  let blurredBgCache = { img: null, blur: -1, canvas: document.createElement('canvas') };
   let currentMedia = {
     active: false,
     title: '',
@@ -291,6 +307,8 @@
     trackKey: '',
     updatedAt: Date.now(),
   };
+  let mediaAnchorPos = 0;
+  let mediaAnchorPerfMs = performance.now();
   let isSeeking = false;
   let parsedLyrics = [];
   let isSyncedLyrics = false;
@@ -300,6 +318,15 @@
   let lyricsReqSeq = 0;
   let lyricsCandidates = [];
   let skipLoadingTimer = null;
+  let cachedLyricItems = [];
+  let cachedCinemaWords = [];
+  let cachedPanelWords = [];
+  let gameOverlayRunning = false;
+  let visualizerEnabled = true;
+  let visPausedByOverlay = false;
+  let liteTickerId = null;
+  let lastOverlaySig = '';
+  let lastOverlayPushMs = 0;
 
   const stars = Array.from({ length: 110 }, () => ({
     angle: Math.random() * Math.PI * 2,
@@ -391,6 +418,7 @@
         if (sliderId.includes('freq')) enforceFreqOrder(sliderId.startsWith('min'));
         if (sliderId.startsWith('lg-')) updateLiquidGlassVars();
         if (sliderId.startsWith('lyric-')) updateLyricAppearanceVars();
+        if (sliderId.startsWith('overlay-')) pushOverlayState(true);
         if (sliderId === 'dpr-slider') resizeCanvas();
         updateFreqReadout();
         saveLastActiveState();
@@ -632,7 +660,7 @@
 
       let fetching = false;
       bridgeAudioTimer = setInterval(async () => {
-        if (fetching || audioSourceMode !== 'bridge') return;
+        if (fetching || audioSourceMode !== 'bridge' || !isVisualizerActive()) return;
         fetching = true;
         try {
           const r = await fetch(audioUrl, { cache: 'no-store' });
@@ -748,73 +776,123 @@
     }
   }
 
-  // --- MEDIA SESSION & LYRICS POLLING ---
-  function parseLrc(lrcText) {
+  // --- BETTER LYRICS PARSER, SYNC & GAME OVERLAY ---
+  function parseEnhancedLrc(lrcText) {
     const lines = [];
-    const regex = /\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\]/g;
+    const lineRegex = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+    const wordRegex = /<(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?>([^<]*)/g;
+
     lrcText.split(/\r?\n/).forEach((rawLine) => {
-      const matches = [...rawLine.matchAll(regex)];
+      const matches = [...rawLine.matchAll(lineRegex)];
       if (matches.length === 0) return;
-      const text = rawLine.replace(regex, '').trim();
+      const rest = rawLine.replace(lineRegex, '').trim();
+
+      const wordMatches = [...rest.matchAll(wordRegex)];
+      let words = null;
+      let cleanText = rest;
+
+      if (wordMatches.length > 0) {
+        words = [];
+        for (let i = 0; i < wordMatches.length; i++) {
+          const wm = wordMatches[i];
+          const ws =
+            parseInt(wm[1], 10) * 60 +
+            parseInt(wm[2], 10) +
+            parseInt((wm[3] || '0').padEnd(3, '0').slice(0, 3), 10) / 1000;
+          const wText = wm[4].trim();
+          if (!wText) continue;
+          const nextWm = wordMatches[i + 1];
+          const we = nextWm
+            ? parseInt(nextWm[1], 10) * 60 +
+              parseInt(nextWm[2], 10) +
+              parseInt((nextWm[3] || '0').padEnd(3, '0').slice(0, 3), 10) / 1000
+            : ws + Math.max(0.24, wText.length * 0.06);
+          words.push({ text: wText, start: ws, end: Math.max(ws + 0.08, we) });
+        }
+        cleanText = words.map((w) => w.text).join(' ');
+      }
+
       matches.forEach((m) => {
         const min = parseInt(m[1], 10);
         const sec = parseInt(m[2], 10);
         const msStr = (m[3] || '0').padEnd(3, '0').slice(0, 3);
         const time = min * 60 + sec + parseInt(msStr, 10) / 1000;
-        lines.push({ time, text: text || '♪' });
+        lines.push({
+          time,
+          text: cleanText || '♪',
+          words: words && words.length > 0 ? words : null,
+        });
       });
     });
+
     lines.sort((a, b) => a.time - b.time);
+    for (let i = 0; i < lines.length; i++) {
+      const nextT = i + 1 < lines.length ? lines[i + 1].time : lines[i].time + 4.5;
+      lines[i].endTime = Math.max(lines[i].time + 0.4, nextT);
+    }
     return lines;
   }
 
-  function buildWordSpans(container, text) {
+  function buildWordSpans(container, lineObjOrText) {
     container.innerHTML = '';
-    const words = text.split(/\s+/).filter(Boolean);
+    const isObj = lineObjOrText && typeof lineObjOrText === 'object';
+    const text = isObj ? lineObjOrText.text || '' : String(lineObjOrText || '');
+    const explicitWords = isObj && Array.isArray(lineObjOrText.words) ? lineObjOrText.words : null;
+    const words = explicitWords ? explicitWords.map((w) => w.text) : text.split(/\s+/).filter(Boolean);
+
     if (words.length === 0) {
       const sp = document.createElement('span');
       sp.className = 'lyric-word';
       sp.textContent = '♪';
       container.appendChild(sp);
-      return;
+      return [sp];
     }
+
+    const spans = [];
     words.forEach((w) => {
       const sp = document.createElement('span');
       sp.className = 'lyric-word';
       sp.textContent = w;
       container.appendChild(sp);
+      spans.push(sp);
     });
+    return spans;
   }
 
   function renderLyricsList() {
     lyricsScrollBody.innerHTML = '';
+    cachedLyricItems = [];
+    cachedActivePanelWords = [];
     activeLyricIdx = -1;
     activeWordIdx = -1;
     if (parsedLyrics.length === 0) {
       lyricsScrollBody.innerHTML = '<div class="lyrics-empty">Lirik tidak ditemukan untuk lagu ini. Coba cari manual di kotak atas.</div>';
       lyricPrevEl.textContent = '';
-      buildWordSpans(lyricCurrEl, currentMedia.title || '♪');
+      cachedCinemaWords = buildWordSpans(lyricCurrEl, currentMedia.title || '♪');
       lyricNextEl.textContent = '';
       return;
     }
 
+    const frag = document.createDocumentFragment();
     parsedLyrics.forEach((line, idx) => {
       const div = document.createElement('div');
       div.className = 'lyric-item dof-far';
       div.dataset.idx = idx;
-      buildWordSpans(div, line.text);
+      buildWordSpans(div, line);
       if (isSyncedLyrics) {
         div.addEventListener('click', () => {
           sendMediaControl('seek', Math.max(0, line.time - lyricOffsetSec));
         });
       }
-      lyricsScrollBody.appendChild(div);
+      frag.appendChild(div);
+      cachedLyricItems.push(div);
     });
+    lyricsScrollBody.appendChild(frag);
   }
 
   function scrollActiveLyricIntoCenter(instant = false) {
     if (activeLyricIdx < 0 || lyricsPanel.classList.contains('hidden')) return;
-    const activeEl = lyricsScrollBody.children[activeLyricIdx];
+    const activeEl = cachedLyricItems[activeLyricIdx];
     if (!activeEl) return;
     const targetTop =
       activeEl.offsetTop - lyricsScrollBody.clientHeight / 2 + activeEl.clientHeight / 2;
@@ -826,21 +904,27 @@
 
   function applyLyricsCandidate(candidate) {
     if (!candidate) return;
-    if (candidate.synced && candidate.syncedLyrics) {
-      parsedLyrics = parseLrc(candidate.syncedLyrics);
+    if (candidate.synced && Array.isArray(candidate.parsedLines) && candidate.parsedLines.length > 0) {
+      parsedLyrics = candidate.parsedLines;
       isSyncedLyrics = true;
-      lyricsStatusBadge.textContent = `${candidate.source || 'LRCLIB'} Sync`;
+      const fmtTag = candidate.richSync ? 'Word Sync' : 'Sync';
+      lyricsStatusBadge.textContent = `${candidate.source || 'Better Lyrics'} • ${fmtTag}`;
+    } else if (candidate.synced && candidate.syncedLyrics) {
+      parsedLyrics = parseEnhancedLrc(candidate.syncedLyrics);
+      isSyncedLyrics = true;
+      lyricsStatusBadge.textContent = `${candidate.source || 'LRCLIB'} • Sync`;
     } else {
       parsedLyrics = (candidate.plainLyrics || '')
         .split(/\r?\n/)
         .filter((l) => l.trim().length > 0)
-        .map((text) => ({ time: -1, text }));
+        .map((text) => ({ time: -1, endTime: -1, text, words: null }));
       isSyncedLyrics = false;
       lyricsStatusBadge.textContent = `${candidate.source || 'Plain'} Lyrics`;
     }
     renderLyricsList();
     updateLiveTimelineAndLyrics();
     scrollActiveLyricIntoCenter(true);
+    pushOverlayState(true);
   }
 
   function populateCandidateSelector(candidates) {
@@ -857,19 +941,20 @@
       const opt = document.createElement('option');
       opt.value = String(idx);
       const dur = c.duration > 0 ? formatTime(c.duration) : '--:--';
-      const tag = c.synced ? 'Synced' : 'Plain';
-      opt.textContent = `${idx + 1}. ${c.trackName} (${dur}) [${c.source} ${tag}]`;
+      const tag = c.richSync ? 'Word-Sync' : c.synced ? 'Synced' : 'Plain';
+      opt.textContent = `${idx + 1}. ${c.trackName} (${dur}) [${c.source} • ${tag}]`;
       lyricsCandidateSelect.appendChild(opt);
     });
   }
 
-  async function fetchLyricsForTrack(title, artist, duration, forceFresh = false) {
+  async function fetchLyricsForTrack(title, artist, duration, forceFresh = false, album = '') {
     const reqId = ++lyricsReqSeq;
-    lyricsStatusBadge.textContent = 'Mencari lirik...';
+    lyricsStatusBadge.textContent = 'Mencari Better Lyrics...';
     lyricsQueryInput.value = title;
     try {
       const freshParam = forceFresh ? '&fresh=1' : '';
-      const url = `${BRIDGE_MEDIA_URL}/api/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist || '')}&duration=${duration || 0}${freshParam}`;
+      const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
+      const url = `${BRIDGE_MEDIA_URL}/api/lyrics?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist || '')}&duration=${duration || 0}${albumParam}${freshParam}`;
       const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       if (reqId !== lyricsReqSeq) return;
@@ -880,6 +965,7 @@
         populateCandidateSelector([]);
         lyricsStatusBadge.textContent = 'Tidak ditemukan';
         renderLyricsList();
+        pushOverlayState(true);
         return;
       }
 
@@ -942,6 +1028,140 @@
     } catch (_) {}
   }
 
+  function buildOverlayConfigPayload() {
+    return {
+      pos: overlayPosSelect ? overlayPosSelect.value : 'top',
+      scale: getVal('overlay-scale-num') || 1.15,
+      opacity: getVal('overlay-opacity-num') || 0.95,
+      showPrevNext: overlayPrevNextToggle ? overlayPrevNextToggle.checked : true,
+      clickThrough: overlayClickThroughToggle ? overlayClickThroughToggle.checked : false,
+    };
+  }
+
+  function pushOverlayState(force = false) {
+    if (!gameOverlayRunning && !force) return;
+    const nowMs = performance.now();
+    const wordsPayload = [];
+    if (activeLyricIdx >= 0 && cachedCinemaWords.length > 0) {
+      for (const sp of cachedCinemaWords) {
+        const st = sp.classList.contains('word-active') ? 2 : sp.classList.contains('spoken') ? 1 : 0;
+        wordsPayload.push({ text: sp.textContent, state: st });
+      }
+    }
+    const prevText = lyricPrevEl.textContent || '';
+    const currText =
+      activeLyricIdx >= 0 && parsedLyrics[activeLyricIdx]
+        ? parsedLyrics[activeLyricIdx].text
+        : currentMedia.active
+          ? currentMedia.title || '♪ ...'
+          : '♪ Menunggu musik...';
+    const nextText = lyricNextEl.textContent || '';
+    const cfg = buildOverlayConfigPayload();
+    const sig = `${currentMedia.active ? 1 : 0}|${currentMedia.status}|${activeLyricIdx}|${activeWordIdx}|${currText}|${cfg.pos}|${cfg.scale}|${cfg.opacity}|${cfg.showPrevNext}|${cfg.clickThrough}`;
+    if (!force && sig === lastOverlaySig && nowMs - lastOverlayPushMs < 1100) return;
+    lastOverlaySig = sig;
+    lastOverlayPushMs = nowMs;
+
+    fetch(`${BRIDGE_MEDIA_URL}/api/overlay-state`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        active: currentMedia.active,
+        playing: currentMedia.status === 'Playing',
+        title: currentMedia.title || '',
+        artist: currentMedia.artist || '',
+        prev: prevText,
+        curr: currText,
+        next: nextText,
+        words: wordsPayload,
+        offsetSec: lyricOffsetSec,
+        config: cfg,
+      }),
+    }).catch(() => {});
+  }
+
+  function isVisualizerActive() {
+    return visualizerEnabled && !visPausedByOverlay && !isWebOverlayMode;
+  }
+
+  function drawLitePlaceholder(reasonText) {
+    if (isWebOverlayMode) return;
+    const width = window.innerWidth;
+    const height = window.innerHeight;
+    ctx.save();
+    ctx.fillStyle = visLightMode ? '#f7f6f1' : '#050507';
+    ctx.fillRect(0, 0, width, height);
+    ctx.textAlign = 'center';
+    ctx.fillStyle = visLightMode ? 'rgba(24,24,27,0.5)' : 'rgba(255,255,255,0.42)';
+    ctx.font = '500 13px Inter, system-ui, sans-serif';
+    ctx.fillText(reasonText, width / 2, height / 2);
+    ctx.restore();
+  }
+
+  function updateVisualizerPowerState() {
+    const active = isVisualizerActive();
+    if (btnVisPower) {
+      btnVisPower.classList.toggle('overlay-active', visualizerEnabled);
+      btnVisPower.textContent = visualizerEnabled ? 'Vis' : 'Vis Off';
+    }
+    if (visEnabledToggle) visEnabledToggle.checked = visualizerEnabled;
+
+    if (!active) {
+      if (animationId) {
+        cancelAnimationFrame(animationId);
+        animationId = null;
+      }
+      drawLitePlaceholder(
+        visPausedByOverlay
+          ? 'Mode Fokus Game Overlay • Visualizer dijeda agar ringan & bebas lag'
+          : 'Visualizer Dimatikan • Mode Hemat CPU & GPU'
+      );
+      if (!liteTickerId && audioSourceMode !== 'none') {
+        liteTickerId = setInterval(() => {
+          if (isVisualizerActive()) {
+            clearInterval(liteTickerId);
+            liteTickerId = null;
+            return;
+          }
+          updateLiveTimelineAndLyrics();
+        }, 120);
+      }
+    } else {
+      if (liteTickerId) {
+        clearInterval(liteTickerId);
+        liteTickerId = null;
+      }
+      if (audioSourceMode !== 'none' && !animationId) {
+        lastFrameTime = performance.now();
+        animationId = requestAnimationFrame(renderLoop);
+      } else if (audioSourceMode === 'none') {
+        drawIdleFrame();
+      }
+    }
+  }
+
+  function syncOverlayButtons(running) {
+    gameOverlayRunning = running;
+    visPausedByOverlay = running;
+    if (btnGameOverlay) btnGameOverlay.classList.toggle('overlay-active', running);
+    if (btnHudOverlay) btnHudOverlay.classList.toggle('overlay-active', running);
+    updateVisualizerPowerState();
+  }
+
+  async function toggleGameOverlay(action = 'toggle') {
+    try {
+      await pushOverlayState(true);
+      const res = await fetch(`${BRIDGE_MEDIA_URL}/api/overlay?action=${encodeURIComponent(action)}`, {
+        cache: 'no-store',
+      });
+      const data = await res.json();
+      syncOverlayButtons(Boolean(data.running));
+      if (!data.available && action !== 'status') {
+        showPresetFeedback('Overlay binary sedang disiapkan atau belum tersedia.');
+      }
+    } catch (_) {}
+  }
+
   async function pollMediaSession() {
     try {
       const res = await fetch(`${BRIDGE_MEDIA_URL}/api/media`, { cache: 'no-store' });
@@ -956,8 +1176,22 @@
       }
 
       const trackChanged = data.trackKey !== currentMedia.trackKey;
+      const statusChanged = data.status !== currentMedia.status;
       const coverChanged =
         typeof data.coverVersion === 'number' && data.coverVersion !== lastCoverVersion;
+
+      const perfNow = performance.now();
+      const predictedPos =
+        currentMedia.status === 'Playing'
+          ? mediaAnchorPos + (perfNow - mediaAnchorPerfMs) / 1000
+          : mediaAnchorPos;
+      const drift = Math.abs((data.position || 0) - predictedPos);
+
+      // Re-anchor smoothly only on track/status change, seek, or >280ms drift to prevent 200ms jitter
+      if (trackChanged || statusChanged || data.status !== 'Playing' || drift > 0.28 || isSeeking) {
+        mediaAnchorPos = data.position || 0;
+        mediaAnchorPerfMs = perfNow;
+      }
 
       currentMedia = {
         ...data,
@@ -982,7 +1216,7 @@
         activeLyricIdx = -1;
         activeWordIdx = -1;
         renderLyricsList();
-        fetchLyricsForTrack(data.title, data.artist, data.duration);
+        fetchLyricsForTrack(data.title, data.artist, data.duration, false, data.album);
       }
 
       if ((trackChanged || coverChanged) && data.title) {
@@ -1001,9 +1235,9 @@
   function updateLiveTimelineAndLyrics() {
     if (!currentMedia.active) return;
 
-    let livePos = currentMedia.position;
+    let livePos = mediaAnchorPos;
     if (currentMedia.status === 'Playing') {
-      livePos += (Date.now() - currentMedia.updatedAt) / 1000;
+      livePos += (performance.now() - mediaAnchorPerfMs) / 1000;
       if (currentMedia.duration > 0) livePos = Math.min(currentMedia.duration, livePos);
     }
 
@@ -1028,68 +1262,109 @@
 
         lyricCurrEl.classList.remove('line-enter');
         void lyricCurrEl.offsetWidth;
-        buildWordSpans(lyricCurrEl, idx >= 0 ? parsedLyrics[idx].text : '♪');
+        cachedCinemaWords = buildWordSpans(lyricCurrEl, idx >= 0 ? parsedLyrics[idx] : '♪');
         lyricCurrEl.classList.add('line-enter');
 
-        const items = lyricsScrollBody.querySelectorAll('.lyric-item');
-        items.forEach((el, i) => {
+        for (let i = 0; i < cachedLyricItems.length; i++) {
+          const el = cachedLyricItems[i];
           el.classList.remove('active', 'dof-1', 'dof-2', 'dof-far');
           const dist = idx < 0 ? 3 : Math.abs(i - idx);
           if (i === idx) el.classList.add('active');
           else if (dist === 1) el.classList.add('dof-1');
           else if (dist === 2) el.classList.add('dof-2');
           else el.classList.add('dof-far');
-        });
+        }
+        cachedActivePanelWords =
+          idx >= 0 && cachedLyricItems[idx]
+            ? [...cachedLyricItems[idx].querySelectorAll('.lyric-word')]
+            : [];
         scrollActiveLyricIntoCenter(false);
       }
 
-      // Word-by-word OR whole-sentence illumination depending on toggle
+      // Word-by-word illumination (Better Lyrics TTML / Enhanced LRC OR char-weighted interpolation)
       if (activeLyricIdx >= 0) {
-        const cinemaWords = lyricCurrEl.querySelectorAll('.lyric-word');
-        const activePanelEl = lyricsScrollBody.querySelector('.lyric-item.active');
-        const panelWords = activePanelEl ? activePanelEl.querySelectorAll('.lyric-word') : [];
+        const lineObj = parsedLyrics[activeLyricIdx];
+        const cinemaWords = cachedCinemaWords;
+        const panelWords = cachedActivePanelWords;
 
         if (!lyricWordAnimToggle.checked) {
           if (activeWordIdx !== -2) {
             activeWordIdx = -2;
-            [cinemaWords, panelWords].forEach((list) => {
-              list.forEach((sp) => {
+            for (const list of [cinemaWords, panelWords]) {
+              for (const sp of list) {
                 sp.classList.add('spoken');
                 sp.classList.remove('word-active');
-              });
-            });
+              }
+            }
+          }
+        } else if (Array.isArray(lineObj.words) && lineObj.words.length > 0) {
+          let wordIdx = 0;
+          for (let wi = 0; wi < lineObj.words.length; wi++) {
+            if (t >= lineObj.words[wi].start) wordIdx = wi;
+            else break;
+          }
+          if (wordIdx !== activeWordIdx) {
+            activeWordIdx = wordIdx;
+            for (const list of [cinemaWords, panelWords]) {
+              for (let wi = 0; wi < list.length; wi++) {
+                const sp = list[wi];
+                const wMeta = lineObj.words[wi];
+                const isDone = wMeta ? t >= wMeta.end : wi < wordIdx;
+                sp.classList.toggle('spoken', wi < wordIdx || isDone);
+                sp.classList.toggle('word-active', wi === wordIdx && !isDone);
+              }
+            }
           }
         } else {
-          const lineStart = parsedLyrics[activeLyricIdx].time;
+          const lineStart = lineObj.time;
           const nextTime =
             activeLyricIdx + 1 < parsedLyrics.length
               ? parsedLyrics[activeLyricIdx + 1].time
               : lineStart + 4.0;
-          const lineDur = Math.max(0.8, Math.min(8.0, nextTime - lineStart));
-          const progress = Math.max(0, Math.min(0.999, (t - lineStart) / lineDur));
           const totalWords = cinemaWords.length;
-
           if (totalWords > 0) {
-            const wordIdx = Math.min(totalWords - 1, Math.floor(progress * totalWords));
+            const totalChars = lineObj.text.length || totalWords * 4;
+            // Smart vocal active window so long instrumental breaks don't crawl slowly
+            const gap = Math.max(0.8, nextTime - lineStart);
+            const estActiveDur = Math.min(gap - 0.08, Math.max(1.0, totalWords * 0.34 + totalChars * 0.032));
+            const progress = Math.max(0, Math.min(0.999, (t - lineStart) / Math.max(0.6, estActiveDur)));
+
+            // Weight duration by word length for natural speech cadence
+            let totalWeight = 0;
+            for (let wi = 0; wi < totalWords; wi++) {
+              totalWeight += cinemaWords[wi].textContent.length + 1.5;
+            }
+            const targetWeight = progress * totalWeight;
+            let acc = 0;
+            let wordIdx = 0;
+            for (let wi = 0; wi < totalWords; wi++) {
+              acc += cinemaWords[wi].textContent.length + 1.5;
+              if (acc >= targetWeight) {
+                wordIdx = wi;
+                break;
+              }
+            }
             if (wordIdx !== activeWordIdx) {
               activeWordIdx = wordIdx;
-              [cinemaWords, panelWords].forEach((list) => {
-                list.forEach((sp, wi) => {
-                  sp.classList.toggle('spoken', wi < wordIdx);
-                  sp.classList.toggle('word-active', wi === wordIdx);
-                });
-              });
+              for (const list of [cinemaWords, panelWords]) {
+                for (let wi = 0; wi < list.length; wi++) {
+                  list[wi].classList.toggle('spoken', wi < wordIdx);
+                  list[wi].classList.toggle('word-active', wi === wordIdx);
+                }
+              }
             }
           }
         }
       }
     }
 
+    pushOverlayState(false);
+
     const showCinema =
-      cinemaLyricsToggle.checked &&
+      (isWebOverlayMode || cinemaLyricsToggle.checked) &&
       currentMedia.active &&
       (isSyncedLyrics || parsedLyrics.length > 0) &&
-      lyricsPanel.classList.contains('hidden');
+      (isWebOverlayMode || lyricsPanel.classList.contains('hidden'));
     lyricsCinema.classList.toggle('hidden', !showCinema);
   }
 
@@ -1244,25 +1519,46 @@
   }
 
   function drawImageCover(img, width, height, clearAlpha) {
+    const blurPx = getVal('bg-blur-num');
+    let sourceToDraw = img;
+
+    // Offscreen pre-blur cache avoids running expensive full-screen blur every frame
+    if (blurPx > 0) {
+      if (blurredBgCache.img !== img || Math.abs(blurredBgCache.blur - blurPx) > 0.4) {
+        const targetW = 640;
+        const targetH = Math.max(180, Math.round((img.height / Math.max(1, img.width)) * targetW));
+        const off = blurredBgCache.canvas;
+        const scaledBlur = Math.max(1, (blurPx * targetW) / Math.max(640, width));
+        const pad = Math.ceil(scaledBlur * 2);
+        off.width = targetW + pad * 2;
+        off.height = targetH + pad * 2;
+        const octx = off.getContext('2d');
+        octx.clearRect(0, 0, off.width, off.height);
+        octx.filter = `blur(${scaledBlur.toFixed(1)}px)`;
+        octx.drawImage(img, pad, pad, targetW, targetH);
+        octx.filter = 'none';
+        blurredBgCache.img = img;
+        blurredBgCache.blur = blurPx;
+      }
+      sourceToDraw = blurredBgCache.canvas;
+    }
+
     ctx.save();
     ctx.globalAlpha = clearAlpha;
-    const blurPx = getVal('bg-blur-num');
-    if (blurPx > 0) ctx.filter = `blur(${blurPx}px)`;
-
-    const imgRatio = img.width / img.height;
-    const winRatio = width / height;
+    const srcW = sourceToDraw.width;
+    const srcH = sourceToDraw.height;
+    const imgRatio = srcW / Math.max(1, srcH);
+    const winRatio = width / Math.max(1, height);
     let drawW = width;
     let drawH = height;
-    const pad = blurPx * 2.2;
     if (winRatio > imgRatio) {
-      drawW = width + pad * 2;
+      drawW = width;
       drawH = drawW / imgRatio;
     } else {
-      drawH = height + pad * 2;
+      drawH = height;
       drawW = drawH * imgRatio;
     }
-    ctx.drawImage(img, (width - drawW) / 2, (height - drawH) / 2, drawW, drawH);
-    ctx.filter = 'none';
+    ctx.drawImage(sourceToDraw, (width - drawW) / 2, (height - drawH) / 2, drawW, drawH);
 
     const tintAlpha = getVal('bg-tint-num');
     if (tintAlpha > 0) {
@@ -1786,6 +2082,10 @@
 
   function renderLoop(now) {
     if (audioSourceMode === 'none') return;
+    if (!isVisualizerActive()) {
+      animationId = null;
+      return;
+    }
     animationId = requestAnimationFrame(renderLoop);
 
     const fpsLimit = getVal('fps-num');
@@ -1883,6 +2183,7 @@
         visLight: visLightMode,
         dpr: getVal('dpr-num'),
         ecoMode: ecoModeToggle.checked,
+        visEnabled: visualizerEnabled,
       },
       ui: {
         uiTheme: uiThemeSelect.value,
@@ -1891,6 +2192,11 @@
         lyricDof: getVal('lyric-dof-num'),
         lyricWordAnim: lyricWordAnimToggle.checked,
         lyricOffset: lyricOffsetSec,
+        overlayPos: overlayPosSelect ? overlayPosSelect.value : 'top',
+        overlayScale: getVal('overlay-scale-num') || 1.15,
+        overlayOpacity: getVal('overlay-opacity-num') || 0.95,
+        overlayPrevNext: overlayPrevNextToggle ? overlayPrevNextToggle.checked : true,
+        overlayClickThrough: overlayClickThroughToggle ? overlayClickThroughToggle.checked : true,
         lgBlur: getVal('lg-blur-num'),
         lgRefract: getVal('lg-refract-num'),
         lgChroma: getVal('lg-chroma-num'),
@@ -1975,6 +2281,10 @@
       if (v.visLight !== undefined) visLightMode = v.visLight;
       setPair('dpr-slider', 'dpr-num', v.dpr);
       if (v.ecoMode !== undefined) ecoModeToggle.checked = v.ecoMode;
+      if (v.visEnabled !== undefined) {
+        visualizerEnabled = v.visEnabled;
+        updateVisualizerPowerState();
+      }
       resizeCanvas();
     }
 
@@ -1991,6 +2301,15 @@
       if (u.lyricOffset !== undefined) {
         lyricOffsetSec = u.lyricOffset;
         lyricOffsetVal.textContent = `${lyricOffsetSec >= 0 ? '+' : ''}${lyricOffsetSec.toFixed(1)}s`;
+      }
+      if (u.overlayPos && overlayPosSelect) overlayPosSelect.value = u.overlayPos;
+      setPair('overlay-scale-slider', 'overlay-scale-num', u.overlayScale);
+      setPair('overlay-opacity-slider', 'overlay-opacity-num', u.overlayOpacity);
+      if (u.overlayPrevNext !== undefined && overlayPrevNextToggle) {
+        overlayPrevNextToggle.checked = u.overlayPrevNext;
+      }
+      if (u.overlayClickThrough !== undefined && overlayClickThroughToggle) {
+        overlayClickThroughToggle.checked = u.overlayClickThrough;
       }
       updateLyricAppearanceVars();
       setPair('lg-blur-slider', 'lg-blur-num', u.lgBlur);
@@ -2292,6 +2611,30 @@
 
   btnLyricsToggle.addEventListener('click', toggleLyricsPanel);
   btnCloseLyrics.addEventListener('click', () => lyricsPanel.classList.add('hidden'));
+  if (btnGameOverlay) btnGameOverlay.addEventListener('click', () => toggleGameOverlay('toggle'));
+  if (btnHudOverlay) btnHudOverlay.addEventListener('click', () => toggleGameOverlay('toggle'));
+  if (btnVisPower) {
+    btnVisPower.addEventListener('click', () => {
+      visualizerEnabled = !visualizerEnabled;
+      updateVisualizerPowerState();
+      saveLastActiveState();
+    });
+  }
+  if (visEnabledToggle) {
+    visEnabledToggle.addEventListener('change', () => {
+      visualizerEnabled = visEnabledToggle.checked;
+      updateVisualizerPowerState();
+      saveLastActiveState();
+    });
+  }
+  [overlayPosSelect, overlayPrevNextToggle, overlayClickThroughToggle].forEach((el) => {
+    if (el) {
+      el.addEventListener('change', () => {
+        pushOverlayState(true);
+        saveLastActiveState();
+      });
+    }
+  });
   btnLyricsSettingsToggle.addEventListener('click', () => {
     lyricsControlsDrawer.classList.toggle('hidden');
   });
@@ -2300,7 +2643,7 @@
     await sendMediaControl('refresh');
     await pollMediaSession();
     if (currentMedia.title) {
-      fetchLyricsForTrack(currentMedia.title, currentMedia.artist, currentMedia.duration, true);
+      fetchLyricsForTrack(currentMedia.title, currentMedia.artist, currentMedia.duration, true, currentMedia.album);
     }
   });
   btnLyricsCinemaToggle.addEventListener('click', () => {
@@ -2401,6 +2744,12 @@
     else if (e.key === 'h' || e.key === 'H') toggleHudVisibility();
     else if (e.key === 's' || e.key === 'S') toggleStudioPanel();
     else if (e.key === 'l' || e.key === 'L') toggleLyricsPanel();
+    else if (e.key === 'g' || e.key === 'G') toggleGameOverlay('toggle');
+    else if (e.key === 'v' || e.key === 'V') {
+      visualizerEnabled = !visualizerEnabled;
+      updateVisualizerPowerState();
+      saveLastActiveState();
+    }
     else if (e.code === 'Space') {
       e.preventDefault();
       sendMediaControl('playpause');
@@ -2457,6 +2806,7 @@
   // Start Media/Lyrics polling (200ms) + Auto WASAPI Audio Bridge (no blocking popup)
   pollMediaSession();
   setInterval(pollMediaSession, 200);
+  toggleGameOverlay('status');
 
   async function bootAutoAudio() {
     setStatus(false, 'Menghubungkan...');

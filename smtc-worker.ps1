@@ -3,6 +3,7 @@
 [Windows.Storage.Streams.IRandomAccessStreamWithContentType, Windows.Storage.Streams, ContentType = WindowsRuntime] | Out-Null
 [Windows.Storage.Streams.IInputStream, Windows.Storage.Streams, ContentType = WindowsRuntime] | Out-Null
 Add-Type -AssemblyName System.Runtime.WindowsRuntime
+Add-Type -AssemblyName System.Drawing
 
 $asTaskGeneric = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object {
     $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -like 'IAsyncOperation*'
@@ -86,12 +87,13 @@ while ($true) {
             $pos = 0.0
             $dur = 0.0
             if ($tl) {
-                $pos = $tl.Position.TotalSeconds
-                $dur = $tl.EndTime.TotalSeconds
+                $startSec = $tl.StartTime.TotalSeconds
+                $pos = [Math]::Max(0.0, $tl.Position.TotalSeconds - $startSec)
+                $dur = [Math]::Max(0.0, $tl.EndTime.TotalSeconds - $startSec)
                 if ($status -eq "Playing" -and $tl.LastUpdatedTime -and $tl.LastUpdatedTime.Year -gt 2000) {
                     $elapsed = ([DateTimeOffset]::UtcNow - $tl.LastUpdatedTime).TotalSeconds
                     if ($elapsed -gt 0 -and $elapsed -lt 3600) {
-                        $pos = [Math]::Min($dur, $pos + $elapsed)
+                        $pos = if ($dur -gt 0) { [Math]::Min($dur, $pos + $elapsed) } else { $pos + $elapsed }
                     }
                 }
             }
@@ -109,6 +111,7 @@ while ($true) {
                 $forceRefresh = $true
             }
 
+            $coverChangedNow = $false
             # Re-read thumbnail right on track change, during the 3.5s settle window (for Brave/Spotify delayed thumbnails), or every ~2s
             $shouldCheckCover = $forceRefresh -or ($now -lt $coverRefreshUntil) -or (($tickCount % 14) -eq 0)
             if ($shouldCheckCover -and $props -and $props.Thumbnail) {
@@ -130,6 +133,34 @@ while ($true) {
                                 $b64 = [Convert]::ToBase64String($bytes)
                                 $cachedCover = "data:$mime;base64,$b64"
                                 $coverVersion++
+                                $coverChangedNow = $true
+
+                                # Decode and downscale to 96x96 raw RGBA for the Rust Game Overlay
+                                try {
+                                    $ms.Position = 0
+                                    $srcBmp = [System.Drawing.Bitmap]::FromStream($ms)
+                                    $dstBmp = New-Object System.Drawing.Bitmap(96, 96, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                                    $g = [System.Drawing.Graphics]::FromImage($dstBmp)
+                                    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+                                    $g.DrawImage($srcBmp, 0, 0, 96, 96)
+                                    $g.Dispose()
+                                    $rect = New-Object System.Drawing.Rectangle(0, 0, 96, 96)
+                                    $bmpData = $dstBmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+                                    $strideLen = 96 * 96 * 4
+                                    $bgra = New-Object byte[] $strideLen
+                                    [System.Runtime.InteropServices.Marshal]::Copy($bmpData.Scan0, $bgra, 0, $strideLen)
+                                    $dstBmp.UnlockBits($bmpData)
+                                    $dstBmp.Dispose()
+                                    $srcBmp.Dispose()
+                                    # Convert BGRA -> RGBA in-place
+                                    for ($pi = 0; $pi -lt $strideLen; $pi += 4) {
+                                        $tmp = $bgra[$pi]
+                                        $bgra[$pi] = $bgra[$pi + 2]
+                                        $bgra[$pi + 2] = $tmp
+                                    }
+                                    $rgbaPath = Join-Path $PSScriptRoot ".overlay-cover.rgba"
+                                    [System.IO.File]::WriteAllBytes($rgbaPath, $bgra)
+                                } catch {}
                             }
                         }
                         $ms.Dispose()
@@ -150,7 +181,8 @@ while ($true) {
                 duration = [Math]::Round($dur, 2)
                 trackKey = $trackKey
                 coverVersion = $coverVersion
-                cover = $cachedCover
+                cover = if ($coverChangedNow) { $cachedCover } else { "" }
+                hasCover = ($cachedCover.Length -gt 0)
             }
             $json = $outObj | ConvertTo-Json -Compress
             [Console]::WriteLine("SMTC_JSON:$json")

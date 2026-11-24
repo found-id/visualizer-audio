@@ -13,6 +13,13 @@ const AUDIO_BRIDGE_EXE = path.join(
   'release',
   'audio-bridge.exe'
 );
+const OVERLAY_EXE = path.join(
+  WORKSPACE_DIR,
+  'desktop-rust',
+  'target',
+  'release',
+  'lyrics-overlay.exe'
+);
 const SMTC_SCRIPT = path.join(WORKSPACE_DIR, 'smtc-worker.ps1');
 
 let latestMedia = {
@@ -32,7 +39,38 @@ let latestMedia = {
 
 let smtcProc = null;
 let audioProc = null;
+let overlayProc = null;
 const lyricsCache = new Map();
+
+// Live state for standalone transparent game lyrics overlay
+let overlayState = {
+  active: false,
+  playing: false,
+  trackKey: '',
+  title: '',
+  artist: '',
+  prev: '',
+  curr: '♪ Menunggu musik...',
+  next: '',
+  words: [], // [{ text, state: 0|1|2 }]
+  progress: 0,
+  updatedAt: 0,
+  fromClient: false,
+  config: {
+    pos: 'top', // 'top' | 'bottom' | 'center'
+    scale: 1.15,
+    opacity: 0.95,
+    showPrevNext: true,
+    clickThrough: false,
+  },
+};
+
+let serverLyricsState = {
+  trackKey: '',
+  fetching: false,
+  lines: [], // [{ time, endTime, text, words?: [{text, start, end}] }]
+  offsetSec: 0,
+};
 
 function startAudioBridge() {
   if (!fs.existsSync(AUDIO_BRIDGE_EXE)) return;
@@ -95,120 +133,527 @@ function sendSmtcCommand(cmdStr) {
   return false;
 }
 
-function fetchJsonHttps(url) {
+function fetchJsonHttps(url, extraHeaders = {}, timeoutMs = 4500) {
   return new Promise((resolve, reject) => {
-    https
-      .get(
-        url,
-        {
-          headers: {
-            'User-Agent': 'AudioSpectrumStudio/2.0 (https://localhost)',
-          },
+    const req = https.get(
+      url,
+      {
+        timeout: timeoutMs,
+        headers: {
+          'User-Agent': 'CobraAudio/3.0 (https://github.com/found-id/visualizer-audio)',
+          Accept: 'application/json',
+          ...extraHeaders,
         },
-        (res) => {
-          let data = '';
-          res.on('data', (c) => (data += c));
-          res.on('end', () => {
-            try {
-              resolve(JSON.parse(data));
-            } catch (e) {
-              reject(e);
-            }
-          });
+      },
+      (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          res.resume();
+          fetchJsonHttps(res.headers.location, extraHeaders, timeoutMs).then(resolve, reject);
+          return;
         }
-      )
-      .on('error', reject);
+        let data = '';
+        res.on('data', (c) => (data += c));
+        res.on('end', () => {
+          if (res.statusCode >= 400) {
+            reject(new Error(`HTTP ${res.statusCode}`));
+            return;
+          }
+          try {
+            resolve(JSON.parse(data));
+          } catch (e) {
+            reject(e);
+          }
+        });
+      }
+    );
+    req.on('timeout', () => {
+      req.destroy(new Error('Request timeout'));
+    });
+    req.on('error', reject);
   });
 }
 
-function buildSearchQueries(rawTitle, rawArtist) {
-  const queries = [];
-  const isSlowed = /slowed/i.test(rawTitle);
-
-  // Clean noise like (Official Video), || ..., [Lyrics], (ft. ...)
-  const stripNoise = (str, keepSlowed) => {
-    let s = str
-      .replace(/\|\|.*$/g, ' ')
-      .replace(/\[[^\]]*\]/g, ' ')
-      .replace(/\((?:ft\.?|feat\.?|official|video|audio|lyrics|visualizer|hd|4k)[^)]*\)/gi, ' ')
-      .replace(/\b(?:ft\.?|feat\.?)\s+[^-|()]+/gi, ' ')
-      .replace(/[^\p{L}\p{N}\s'-]/gu, ' ');
-    if (!keepSlowed) {
-      s = s.replace(/\b(?:slowed|reverb|reverbed|sped\s*up|nightcore|tiktok|version|edit)\b/gi, ' ');
-    }
-    return s.replace(/\s+/g, ' ').trim();
-  };
-
-  if (isSlowed) {
-    const qSlowed = `${stripNoise(rawTitle, false)} slowed`;
-    if (qSlowed.length > 3) queries.push(qSlowed);
-  }
-
-  const baseTitle = stripNoise(rawTitle, false);
-  const cleanArtist = (rawArtist || '').replace(/\s*-\s*Topic$/i, '').trim();
-
-  if (baseTitle.length > 1) {
-    queries.push(baseTitle);
-    if (cleanArtist && !baseTitle.toLowerCase().includes(cleanArtist.toLowerCase())) {
-      queries.push(`${cleanArtist} ${baseTitle}`);
-    }
-  }
-
-  return [...new Set(queries)];
+function normalizeText(s) {
+  return (s || '')
+    .toLowerCase()
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-async function findBestLyrics(title, artist, duration, forceFresh = false) {
-  const cacheKey = `${title}|${artist}`;
-  if (!forceFresh && lyricsCache.has(cacheKey)) return lyricsCache.get(cacheKey);
+function stripTrackNoise(str, keepVariants = false) {
+  if (!str) return '';
+  let s = str
+    .replace(/\|\|.*$/g, ' ')
+    .replace(/\|.*$/g, ' ')
+    .replace(/【[^】]*】/g, ' ')
+    .replace(/\[[^\]]*(?:official|video|audio|lyrics|lyric|mv|m\/v|hd|4k|visualizer|sub|eng|indo|live|prod\.?)[^\]]*\]/gi, ' ')
+    .replace(/\((?:ft\.?|feat\.?|featuring|with|official|music\s*video|video|audio|lyrics|lyric|visualizer|hd|4k|hq|explicit|clean|radio\s*edit)[^)]*\)/gi, ' ')
+    .replace(/\b(?:ft\.?|feat\.?|featuring)\s+[^-|()\[\]]+/gi, ' ')
+    .replace(/\s*-\s*Topic$/i, '');
+  if (!keepVariants) {
+    s = s.replace(/\b(?:slowed(?:\s*\+?\s*reverb)?|reverbed|sped\s*up|nightcore|tiktok\s*version|bass\s*boosted|8d\s*audio)\b/gi, ' ');
+  }
+  return s.replace(/\s+/g, ' ').trim();
+}
 
-  const queries = buildSearchQueries(title, artist);
-  let rawResults = [];
+function parseTrackMetadata(rawTitle, rawArtist, rawAlbum) {
+  let cleanTitle = stripTrackNoise(rawTitle, false);
+  let cleanArtist = (rawArtist || '')
+    .replace(/\s*-\s*Topic$/i, '')
+    .replace(/VEVO$/i, '')
+    .replace(/Official$/i, '')
+    .trim();
 
-  for (const q of queries) {
-    try {
-      const results = await fetchJsonHttps(
-        `https://lrclib.net/api/search?q=${encodeURIComponent(q)}`
-      );
-      if (Array.isArray(results) && results.length > 0) {
-        rawResults.push(...results);
-        if (rawResults.filter((c) => c.syncedLyrics).length >= 3) break;
+  // Handle "Artist - Song Title" format commonly emitted by YouTube / Browser SMTC
+  if (cleanTitle.includes(' - ')) {
+    const parts = cleanTitle.split(' - ');
+    if (parts.length >= 2) {
+      const maybeArtist = parts[0].trim();
+      const maybeTitle = parts.slice(1).join(' - ').trim();
+      const artistNorm = normalizeText(cleanArtist);
+      const maybeArtistNorm = normalizeText(maybeArtist);
+      if (
+        !artistNorm ||
+        artistNorm === 'youtube' ||
+        artistNorm === 'youtube music' ||
+        artistNorm === 'brave' ||
+        artistNorm === 'chrome' ||
+        artistNorm.includes(maybeArtistNorm) ||
+        maybeArtistNorm.includes(artistNorm)
+      ) {
+        if (maybeTitle.length >= 2) {
+          cleanArtist = maybeArtist;
+          cleanTitle = maybeTitle;
+        }
       }
-    } catch (_) {}
+    }
   }
 
-  const targetDur = parseFloat(duration) || 0;
-  const seenIds = new Set();
-  const deduped = [];
-  for (const item of rawResults) {
+  // Strip trailing parentheses if title still has leftover noise
+  cleanTitle = cleanTitle.replace(/\([^)]*\)/g, ' ').replace(/\[[^\]]*\]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!cleanTitle) cleanTitle = (rawTitle || '').trim();
+
+  const rawLower = (rawTitle || '').toLowerCase();
+  return {
+    cleanTitle,
+    cleanArtist,
+    cleanAlbum: stripTrackNoise(rawAlbum || '', false),
+    wantVariants: {
+      slowed: /\bslowed\b/.test(rawLower),
+      spedUp: /\bsped\s*up\b/.test(rawLower),
+      nightcore: /\bnightcore\b/.test(rawLower),
+      remix: /\bremix\b/.test(rawLower),
+      acoustic: /\bacoustic\b/.test(rawLower),
+      live: /\blive\b/.test(rawLower),
+      instrumental: /\binstrumental\b/.test(rawLower),
+    },
+  };
+}
+
+function tokenSimilarity(a, b) {
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+  if (!na || !nb) return 0;
+  if (na === nb) return 1;
+  if (na.includes(nb) || nb.includes(na)) return 0.85;
+  const ta = new Set(na.split(' ').filter(Boolean));
+  const tb = new Set(nb.split(' ').filter(Boolean));
+  let inter = 0;
+  for (const w of ta) if (tb.has(w)) inter++;
+  return inter / Math.max(ta.size, tb.size);
+}
+
+function parseTimestampToSec(ts) {
+  if (!ts) return 0;
+  const parts = String(ts).trim().split(':');
+  if (parts.length === 3) {
+    return parseFloat(parts[0]) * 3600 + parseFloat(parts[1]) * 60 + parseFloat(parts[2]);
+  }
+  if (parts.length === 2) {
+    return parseFloat(parts[0]) * 60 + parseFloat(parts[1]);
+  }
+  const s = String(ts).trim();
+  if (s.endsWith('ms')) return parseFloat(s) / 1000;
+  if (s.endsWith('s')) return parseFloat(s);
+  return parseFloat(s) || 0;
+}
+
+function decodeXmlEntities(str) {
+  return (str || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&apos;/g, "'");
+}
+
+function parseTtmlToLines(ttml) {
+  const lines = [];
+  const pRegex = /<p\b([^>]*)>([\s\S]*?)<\/p>/gi;
+  let pm;
+  while ((pm = pRegex.exec(ttml)) !== null) {
+    const attrs = pm[1] || '';
+    const inner = pm[2] || '';
+    const beginM = attrs.match(/\bbegin="([^"]+)"/i);
+    if (!beginM) continue;
+    const endM = attrs.match(/\bend="([^"]+)"/i);
+    const startTime = parseTimestampToSec(beginM[1]);
+    const endTime = endM ? parseTimestampToSec(endM[1]) : startTime + 4;
+
+    const words = [];
+    const spanRegex = /<span\b([^>]*)>([\s\S]*?)<\/span>/gi;
+    let sm;
+    while ((sm = spanRegex.exec(inner)) !== null) {
+      const sAttrs = sm[1] || '';
+      if (/x-bg|role="x-bg"/i.test(sAttrs)) continue;
+      const wBegin = sAttrs.match(/\bbegin="([^"]+)"/i);
+      const wEnd = sAttrs.match(/\bend="([^"]+)"/i);
+      const rawText = decodeXmlEntities(sm[2].replace(/<[^>]+>/g, '')).trim();
+      if (!rawText) continue;
+      if (wBegin) {
+        const ws = parseTimestampToSec(wBegin[1]);
+        const we = wEnd ? parseTimestampToSec(wEnd[1]) : ws + 0.35;
+        words.push({ text: rawText, start: ws, end: Math.max(ws + 0.08, we) });
+      }
+    }
+
+    const plainLine = decodeXmlEntities(inner.replace(/<[^>]+>/g, ' '))
+      .replace(/\s+/g, ' ')
+      .trim();
+    const text = words.length > 0 ? words.map((w) => w.text).join(' ') : plainLine;
+    if (text) {
+      lines.push({
+        time: startTime,
+        endTime: Math.max(startTime + 0.4, endTime),
+        text,
+        words: words.length > 0 ? words : null,
+      });
+    }
+  }
+  lines.sort((a, b) => a.time - b.time);
+  return lines;
+}
+
+function parseEnhancedLrcToLines(lrcText) {
+  const lines = [];
+  const lineTagRegex = /\[(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
+  const wordTagRegex = /<(\d{1,2}):(\d{2})(?:[.:](\d{1,3}))?>([^<]*)/g;
+
+  for (const rawLine of (lrcText || '').split(/\r?\n/)) {
+    const matches = [...rawLine.matchAll(lineTagRegex)];
+    if (matches.length === 0) continue;
+    const rest = rawLine.replace(lineTagRegex, '').trim();
+
+    const wordMatches = [...rest.matchAll(wordTagRegex)];
+    let parsedWords = null;
+    let cleanText = rest;
+
+    if (wordMatches.length > 0) {
+      parsedWords = [];
+      for (let i = 0; i < wordMatches.length; i++) {
+        const wm = wordMatches[i];
+        const ws =
+          parseInt(wm[1], 10) * 60 +
+          parseInt(wm[2], 10) +
+          parseInt((wm[3] || '0').padEnd(3, '0').slice(0, 3), 10) / 1000;
+        const wText = wm[4].trim();
+        if (!wText) continue;
+        const nextMatch = wordMatches[i + 1];
+        const nextWs = nextMatch
+          ? parseInt(nextMatch[1], 10) * 60 +
+            parseInt(nextMatch[2], 10) +
+            parseInt((nextMatch[3] || '0').padEnd(3, '0').slice(0, 3), 10) / 1000
+          : ws + Math.max(0.25, wText.length * 0.06);
+        parsedWords.push({ text: wText, start: ws, end: Math.max(ws + 0.08, nextWs) });
+      }
+      cleanText = parsedWords.map((w) => w.text).join(' ');
+    }
+
+    for (const m of matches) {
+      const time =
+        parseInt(m[1], 10) * 60 +
+        parseInt(m[2], 10) +
+        parseInt((m[3] || '0').padEnd(3, '0').slice(0, 3), 10) / 1000;
+      lines.push({
+        time,
+        text: cleanText || '♪',
+        words: parsedWords && parsedWords.length > 0 ? parsedWords : null,
+      });
+    }
+  }
+  lines.sort((a, b) => a.time - b.time);
+  for (let i = 0; i < lines.length; i++) {
+    const nextT = i + 1 < lines.length ? lines[i + 1].time : lines[i].time + 5;
+    lines[i].endTime = Math.max(lines[i].time + 0.4, nextT);
+  }
+  return lines;
+}
+
+function scoreLyricsCandidate(c, meta, targetDur) {
+  let score = 0;
+  const titleSim = tokenSimilarity(c.trackName, meta.cleanTitle);
+  const artistSim = meta.cleanArtist ? tokenSimilarity(c.artistName, meta.cleanArtist) : 0.5;
+
+  score += titleSim * 55;
+  score += artistSim * 35;
+
+  if (c.richSync) score += 32;
+  if (c.synced) score += 45;
+  if (c.source === 'Unison (Better Lyrics)') score += 18;
+  else if (c.source === 'LRCLIB Exact') score += 14;
+  else if (c.source === 'KuGou Legato') score += 8;
+
+  if (targetDur > 0 && c.duration > 0) {
+    const diff = Math.abs(c.duration - targetDur);
+    if (diff <= 1.5) score += 35;
+    else if (diff <= 3.5) score += 24;
+    else if (diff <= 7.0) score += 10;
+    else if (diff <= 15.0) score -= 12;
+    else score -= Math.min(75, diff * 1.5);
+  }
+
+  // Penalize unwanted remix/karaoke/cover unless requested by active song title
+  const candLower = `${c.trackName} ${c.artistName}`.toLowerCase();
+  const unwanted = [
+    ['karaoke', false],
+    ['instrumental', meta.wantVariants.instrumental],
+    ['cover', false],
+    ['tribute', false],
+    ['slowed', meta.wantVariants.slowed],
+    ['sped up', meta.wantVariants.spedUp],
+    ['nightcore', meta.wantVariants.nightcore],
+    ['remix', meta.wantVariants.remix],
+    ['acoustic', meta.wantVariants.acoustic],
+  ];
+  for (const [kw, wanted] of unwanted) {
+    if (!wanted && candLower.includes(kw)) score -= 55;
+  }
+
+  // Line quality sanity check
+  const lineCount = (c.syncedLyrics || c.plainLyrics || '').split(/\r?\n/).filter((l) => l.trim()).length;
+  if (lineCount < 4) score -= 40;
+  else if (lineCount >= 10) score += 8;
+
+  return score;
+}
+
+async function fetchUnisonCandidate(meta, targetDur) {
+  try {
+    const u = new URL('https://unison.betterlyrics.org/lyrics');
+    u.searchParams.set('song', meta.cleanTitle);
+    if (meta.cleanArtist) u.searchParams.set('artist', meta.cleanArtist);
+    if (targetDur > 0) u.searchParams.set('duration', String(Math.round(targetDur)));
+    if (meta.cleanAlbum) u.searchParams.set('album', meta.cleanAlbum);
+
+    const json = await fetchJsonHttps(u.toString(), { 'x-key-id': 'cobra-audio-client' }, 3500);
+    const d = json && json.data;
+    if (!d || !d.lyrics) return null;
+
+    if (d.format === 'ttml') {
+      const lines = parseTtmlToLines(d.lyrics);
+      if (lines.length === 0) return null;
+      const hasWordSync = lines.some((l) => l.words && l.words.length > 0);
+      return {
+        source: 'Unison (Better Lyrics)',
+        format: 'ttml',
+        trackName: meta.cleanTitle,
+        artistName: meta.cleanArtist,
+        duration: targetDur,
+        synced: true,
+        richSync: hasWordSync,
+        syncedLyrics: '',
+        ttmlLyrics: d.lyrics,
+        parsedLines: lines,
+        plainLyrics: lines.map((l) => l.text).join('\n'),
+      };
+    }
+
+    if (d.format === 'lrc') {
+      const hasRichTags = /<\d{1,2}:\d{2}(?:[.:]\d{1,3})?>/.test(d.lyrics);
+      const lines = parseEnhancedLrcToLines(d.lyrics);
+      return {
+        source: 'Unison (Better Lyrics)',
+        format: hasRichTags ? 'rich-lrc' : 'lrc',
+        trackName: meta.cleanTitle,
+        artistName: meta.cleanArtist,
+        duration: targetDur,
+        synced: lines.length > 0,
+        richSync: hasRichTags || d.syncType === 'richsync',
+        syncedLyrics: d.lyrics,
+        parsedLines: lines,
+        plainLyrics: lines.map((l) => l.text).join('\n'),
+      };
+    }
+
+    return {
+      source: 'Unison (Better Lyrics)',
+      format: 'plain',
+      trackName: meta.cleanTitle,
+      artistName: meta.cleanArtist,
+      duration: targetDur,
+      synced: false,
+      richSync: false,
+      syncedLyrics: '',
+      plainLyrics: d.lyrics,
+    };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function fetchLrclibCandidates(meta, targetDur) {
+  const out = [];
+  const tasks = [];
+
+  if (meta.cleanTitle && meta.cleanArtist && targetDur > 0) {
+    const getUrl = new URL('https://lrclib.net/api/get');
+    getUrl.searchParams.set('track_name', meta.cleanTitle);
+    getUrl.searchParams.set('artist_name', meta.cleanArtist);
+    getUrl.searchParams.set('duration', String(Math.round(targetDur)));
+    if (meta.cleanAlbum) getUrl.searchParams.set('album_name', meta.cleanAlbum);
+    tasks.push(
+      fetchJsonHttps(getUrl.toString(), {}, 3500)
+        .then((item) => {
+          if (item && (item.syncedLyrics || item.plainLyrics)) {
+            out.push({ ...item, _isExact: true });
+          }
+        })
+        .catch(() => {})
+    );
+  }
+
+  if (meta.cleanTitle && meta.cleanArtist) {
+    const sUrl = new URL('https://lrclib.net/api/search');
+    sUrl.searchParams.set('track_name', meta.cleanTitle);
+    sUrl.searchParams.set('artist_name', meta.cleanArtist);
+    tasks.push(
+      fetchJsonHttps(sUrl.toString(), {}, 3800)
+        .then((arr) => {
+          if (Array.isArray(arr)) out.push(...arr);
+        })
+        .catch(() => {})
+    );
+  }
+
+  const qStr = meta.cleanArtist ? `${meta.cleanArtist} ${meta.cleanTitle}` : meta.cleanTitle;
+  if (qStr) {
+    tasks.push(
+      fetchJsonHttps(`https://lrclib.net/api/search?q=${encodeURIComponent(qStr)}`, {}, 3800)
+        .then((arr) => {
+          if (Array.isArray(arr)) out.push(...arr);
+        })
+        .catch(() => {})
+    );
+  }
+
+  await Promise.all(tasks);
+
+  const seen = new Set();
+  const mapped = [];
+  for (const item of out) {
     if (!item || (!item.syncedLyrics && !item.plainLyrics)) continue;
     const key = item.id || `${item.trackName}|${item.artistName}|${item.duration}`;
-    if (seenIds.has(key)) continue;
-    seenIds.add(key);
-    deduped.push({
-      source: 'LRCLIB',
-      trackName: item.trackName || title,
-      artistName: item.artistName || artist,
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    const syncedStr = item.syncedLyrics || '';
+    const hasRichTags = /<\d{1,2}:\d{2}(?:[.:]\d{1,3})?>/.test(syncedStr);
+    const parsedLines = syncedStr ? parseEnhancedLrcToLines(syncedStr) : null;
+
+    mapped.push({
+      source: item._isExact ? 'LRCLIB Exact' : 'LRCLIB',
+      format: hasRichTags ? 'rich-lrc' : syncedStr ? 'lrc' : 'plain',
+      trackName: item.trackName || meta.cleanTitle,
+      artistName: item.artistName || meta.cleanArtist,
       duration: item.duration || 0,
-      synced: Boolean(item.syncedLyrics),
-      syncedLyrics: item.syncedLyrics || '',
+      synced: Boolean(syncedStr),
+      richSync: hasRichTags,
+      syncedLyrics: syncedStr,
+      parsedLines,
       plainLyrics: item.plainLyrics || '',
     });
   }
+  return mapped;
+}
 
-  // Fallback to Lyrics.ovh if LRCLIB has no matches
-  if (deduped.length === 0 && artist) {
+async function fetchKugouLegatoCandidates(meta, targetDur) {
+  try {
+    const kw = meta.cleanArtist ? `${meta.cleanArtist} - ${meta.cleanTitle}` : meta.cleanTitle;
+    const durMs = targetDur > 0 ? Math.round(targetDur * 1000) : 0;
+    const searchUrl = `https://lyrics.kugou.com/search?ver=1&man=yes&client=pc&keyword=${encodeURIComponent(kw)}${durMs > 0 ? `&duration=${durMs}` : ''}`;
+    const res = await fetchJsonHttps(searchUrl, {}, 3500);
+    const cands = Array.isArray(res && res.candidates) ? res.candidates.slice(0, 2) : [];
+    const results = await Promise.all(
+      cands.map(async (c) => {
+        try {
+          const dlUrl = `https://lyrics.kugou.com/download?ver=1&client=pc&id=${c.id}&accesskey=${c.accesskey}&fmt=lrc&charset=utf8`;
+          const dl = await fetchJsonHttps(dlUrl, {}, 3500);
+          if (!dl || !dl.content) return null;
+          const lrcText = Buffer.from(dl.content, 'base64').toString('utf8');
+          const lines = parseEnhancedLrcToLines(lrcText);
+          if (lines.length < 3) return null;
+          return {
+            source: 'KuGou Legato',
+            format: 'lrc',
+            trackName: c.song || meta.cleanTitle,
+            artistName: c.singer || meta.cleanArtist,
+            duration: c.duration ? c.duration / 1000 : targetDur,
+            synced: true,
+            richSync: false,
+            syncedLyrics: lrcText,
+            parsedLines: lines,
+            plainLyrics: lines.map((l) => l.text).join('\n'),
+          };
+        } catch (_) {
+          return null;
+        }
+      })
+    );
+    return results.filter(Boolean);
+  } catch (_) {
+    return [];
+  }
+}
+
+async function findBestLyrics(title, artist, duration, forceFresh = false, album = '') {
+  const targetDur = parseFloat(duration) || 0;
+  const meta = parseTrackMetadata(title, artist, album);
+  const cacheKey = `${meta.cleanTitle}|${meta.cleanArtist}|${Math.round(targetDur / 5)}`;
+  if (!forceFresh && lyricsCache.has(cacheKey)) return lyricsCache.get(cacheKey);
+
+  // Query Unison (Better Lyrics), LRCLIB (Exact + Search), and KuGou Legato in parallel!
+  const [unisonCand, lrclibList, kugouList] = await Promise.all([
+    fetchUnisonCandidate(meta, targetDur),
+    fetchLrclibCandidates(meta, targetDur),
+    fetchKugouLegatoCandidates(meta, targetDur),
+  ]);
+
+  const all = [];
+  if (unisonCand) all.push(unisonCand);
+  all.push(...lrclibList);
+  all.push(...kugouList);
+
+  // Fallback to Lyrics.ovh only when all synced databases returned nothing
+  if (all.length === 0 && meta.cleanArtist) {
     try {
-      const cleanA = artist.replace(/\s*-\s*Topic$/i, '').trim();
       const ovh = await fetchJsonHttps(
-        `https://api.lyrics.ovh/v1/${encodeURIComponent(cleanA)}/${encodeURIComponent(title)}`
+        `https://api.lyrics.ovh/v1/${encodeURIComponent(meta.cleanArtist)}/${encodeURIComponent(meta.cleanTitle)}`,
+        {},
+        3000
       );
       if (ovh && ovh.lyrics) {
-        deduped.push({
+        all.push({
           source: 'Lyrics.ovh',
-          trackName: title,
-          artistName: cleanA,
+          format: 'plain',
+          trackName: meta.cleanTitle,
+          artistName: meta.cleanArtist,
           duration: targetDur,
           synced: false,
+          richSync: false,
           syncedLyrics: '',
           plainLyrics: ovh.lyrics,
         });
@@ -216,32 +661,128 @@ async function findBestLyrics(title, artist, duration, forceFresh = false) {
     } catch (_) {}
   }
 
-  if (deduped.length === 0) {
+  if (all.length === 0) {
     const empty = { found: false, candidates: [] };
     lyricsCache.set(cacheKey, empty);
     return empty;
   }
 
-  deduped.sort((a, b) => {
-    if (a.synced !== b.synced) return a.synced ? -1 : 1;
-    if (targetDur <= 0) return 0;
-    return Math.abs(a.duration - targetDur) - Math.abs(b.duration - targetDur);
+  all.forEach((c) => {
+    c.score = Math.round(scoreLyricsCandidate(c, meta, targetDur));
   });
+  all.sort((a, b) => b.score - a.score);
 
-  const topCandidates = deduped.slice(0, 8);
+  const topCandidates = all.slice(0, 10);
   const best = topCandidates[0];
   const output = {
     found: true,
     synced: best.synced,
+    richSync: Boolean(best.richSync),
+    format: best.format || (best.synced ? 'lrc' : 'plain'),
+    source: best.source,
     trackName: best.trackName,
     artistName: best.artistName,
     duration: best.duration,
-    syncedLyrics: best.syncedLyrics,
-    plainLyrics: best.plainLyrics,
+    syncedLyrics: best.syncedLyrics || '',
+    ttmlLyrics: best.ttmlLyrics || '',
+    parsedLines: best.parsedLines || null,
+    plainLyrics: best.plainLyrics || '',
     candidates: topCandidates,
   };
   lyricsCache.set(cacheKey, output);
   return output;
+}
+
+function isOverlayRunning() {
+  return Boolean(overlayProc && !overlayProc.killed && overlayProc.exitCode === null);
+}
+
+function startOverlayProcess() {
+  if (isOverlayRunning()) return true;
+  if (!fs.existsSync(OVERLAY_EXE)) return false;
+  overlayProc = spawn(OVERLAY_EXE, [], {
+    cwd: WORKSPACE_DIR,
+    stdio: 'ignore',
+    windowsHide: false,
+  });
+  overlayProc.on('exit', () => {
+    overlayProc = null;
+  });
+  return true;
+}
+
+function stopOverlayProcess() {
+  if (!overlayProc) return false;
+  try {
+    overlayProc.kill();
+  } catch (_) {}
+  overlayProc = null;
+  return true;
+}
+
+// Keep autonomous server lyrics synced when main UI isn't pushing overlay state
+async function syncServerOverlayFallback() {
+  if (!latestMedia.active || !latestMedia.title) return;
+  if (Date.now() - overlayState.updatedAt < 1800 && overlayState.fromClient) return;
+
+  if (serverLyricsState.trackKey !== latestMedia.trackKey && !serverLyricsState.fetching) {
+    serverLyricsState.trackKey = latestMedia.trackKey;
+    serverLyricsState.fetching = true;
+    serverLyricsState.lines = [];
+    findBestLyrics(latestMedia.title, latestMedia.artist, latestMedia.duration, false, latestMedia.album)
+      .then((res) => {
+        if (serverLyricsState.trackKey !== latestMedia.trackKey) return;
+        if (res && res.found && Array.isArray(res.parsedLines)) {
+          serverLyricsState.lines = res.parsedLines;
+        }
+      })
+      .finally(() => {
+        serverLyricsState.fetching = false;
+      });
+  }
+
+  let livePos = latestMedia.position;
+  if (latestMedia.status === 'Playing') {
+    livePos += (Date.now() - latestMedia.updatedAt) / 1000;
+  }
+  const t = livePos + (serverLyricsState.offsetSec || 0);
+  const lines = serverLyricsState.lines;
+  let idx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].time <= t) idx = i;
+    else break;
+  }
+
+  overlayState.active = true;
+  overlayState.playing = latestMedia.status === 'Playing';
+  overlayState.trackKey = latestMedia.trackKey;
+  overlayState.title = latestMedia.title;
+  overlayState.artist = latestMedia.artist;
+  overlayState.prev = idx > 0 ? lines[idx - 1].text : '';
+  overlayState.curr = idx >= 0 ? lines[idx].text : lines.length > 0 ? '♪ ...' : `${latestMedia.title}`;
+  overlayState.next = idx + 1 < lines.length ? lines[idx + 1].text : '';
+
+  if (idx >= 0) {
+    const line = lines[idx];
+    if (Array.isArray(line.words) && line.words.length > 0) {
+      overlayState.words = line.words.map((w) => ({
+        text: w.text,
+        state: t >= w.end ? 1 : t >= w.start ? 2 : 0,
+      }));
+    } else {
+      const splitWords = line.text.split(/\s+/).filter(Boolean);
+      const nextT = line.endTime || line.time + 3.5;
+      const activeDur = Math.max(0.9, Math.min(nextT - line.time, splitWords.length * 0.42 + 0.6));
+      const prog = Math.max(0, Math.min(0.999, (t - line.time) / activeDur));
+      const wIdx = Math.floor(prog * splitWords.length);
+      overlayState.words = splitWords.map((w, wi) => ({
+        text: w,
+        state: wi < wIdx ? 1 : wi === wIdx ? 2 : 0,
+      }));
+    }
+  } else {
+    overlayState.words = [];
+  }
 }
 
 const MIME_TYPES = {
@@ -345,6 +886,7 @@ async function handleRequest(req, res) {
   if (pathname.endsWith('/api/lyrics')) {
     const title = parsedUrl.searchParams.get('title') || '';
     const artist = parsedUrl.searchParams.get('artist') || '';
+    const album = parsedUrl.searchParams.get('album') || '';
     const duration = parsedUrl.searchParams.get('duration') || '0';
     const fresh = parsedUrl.searchParams.get('fresh') === '1';
     if (!title) {
@@ -352,9 +894,106 @@ async function handleRequest(req, res) {
       res.end(JSON.stringify({ found: false }));
       return;
     }
-    const result = await findBestLyrics(title, artist, duration, fresh);
+    const result = await findBestLyrics(title, artist, duration, fresh, album);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     res.end(JSON.stringify(result));
+    return;
+  }
+
+  if (pathname.endsWith('/api/overlay')) {
+    const action = parsedUrl.searchParams.get('action') || 'status';
+    let running = isOverlayRunning();
+    if (action === 'on' || (action === 'toggle' && !running)) {
+      running = startOverlayProcess();
+    } else if (action === 'off' || (action === 'toggle' && running)) {
+      stopOverlayProcess();
+      running = false;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(
+      JSON.stringify({
+        running,
+        available: fs.existsSync(OVERLAY_EXE),
+        config: overlayState.config,
+      })
+    );
+    return;
+  }
+
+  if (pathname.endsWith('/api/overlay-state')) {
+    if (req.method === 'POST') {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        try {
+          const p = JSON.parse(body || '{}');
+          if (p.config && typeof p.config === 'object') {
+            overlayState.config = { ...overlayState.config, ...p.config };
+          }
+          if (typeof p.offsetSec === 'number') {
+            serverLyricsState.offsetSec = p.offsetSec;
+          }
+          if (p.curr !== undefined) {
+            overlayState.active = Boolean(p.active);
+            overlayState.playing = Boolean(p.playing);
+            overlayState.title = p.title || '';
+            overlayState.artist = p.artist || '';
+            overlayState.prev = p.prev || '';
+            overlayState.curr = p.curr || '';
+            overlayState.next = p.next || '';
+            overlayState.words = Array.isArray(p.words) ? p.words : [];
+            overlayState.fromClient = true;
+            overlayState.updatedAt = Date.now();
+          }
+        } catch (_) {}
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: true, running: isOverlayRunning() }));
+      });
+      return;
+    }
+    await syncServerOverlayFallback();
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ ...overlayState, running: isOverlayRunning() }));
+    return;
+  }
+
+  if (pathname.endsWith('/api/overlay-cover')) {
+    const rgbaPath = path.join(WORKSPACE_DIR, '.overlay-cover.rgba');
+    if (latestMedia.cover && fs.existsSync(rgbaPath)) {
+      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' });
+      fs.createReadStream(rgbaPath).pipe(res);
+    } else {
+      res.writeHead(204);
+      res.end();
+    }
+    return;
+  }
+
+  if (pathname.endsWith('/api/overlay-feed')) {
+    await syncServerOverlayFallback();
+    const cleanLine = (s) => String(s || '').replace(/[\r\n\t]+/g, ' ').trim();
+    const wordsEncoded = (overlayState.words || [])
+      .map((w) => `${cleanLine(w.text).replace(/\x1f/g, '')}\x1f${w.state || 0}`)
+      .join('\t');
+    const cfg = overlayState.config;
+    const payload = [
+      `active=${overlayState.active ? 1 : 0}`,
+      `playing=${overlayState.playing ? 1 : 0}`,
+      `title=${cleanLine(overlayState.title)}`,
+      `artist=${cleanLine(overlayState.artist)}`,
+      `cover_version=${latestMedia.cover && latestMedia.coverVersion ? latestMedia.coverVersion : 0}`,
+      `prev=${cleanLine(overlayState.prev)}`,
+      `curr=${cleanLine(overlayState.curr)}`,
+      `next=${cleanLine(overlayState.next)}`,
+      `words=${wordsEncoded}`,
+      `pos=${cleanLine(cfg.pos || 'top')}`,
+      `scale=${Number(cfg.scale || 1.15).toFixed(2)}`,
+      `opacity=${Number(cfg.opacity ?? 0.95).toFixed(2)}`,
+      `show_prev_next=${cfg.showPrevNext !== false ? 1 : 0}`,
+      `click_through=${cfg.clickThrough === true ? 1 : 0}`,
+    ].join('\n');
+    res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(payload);
     return;
   }
 

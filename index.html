@@ -44,9 +44,10 @@
         <span id="lyrics-status-badge" class="freq-readout">LRCLIB Sync</span>
       </div>
       <div class="header-actions">
+        <button id="btn-game-overlay" class="icon-btn overlay-toggle-btn" title="Game Overlay Transparan (Baca lirik di atas game tanpa background)">Overlay</button>
         <button id="btn-lyrics-refresh" class="icon-btn" title="Refresh Lirik & Metadata Lagu">↻</button>
         <button id="btn-lyrics-cinema-toggle" class="icon-btn" title="Toggle Subtitle Cinema">CC</button>
-        <button id="btn-lyrics-settings-toggle" class="icon-btn" title="Atur Scale, Blur DOF & Sumber Lirik">⚙</button>
+        <button id="btn-lyrics-settings-toggle" class="icon-btn" title="Atur Scale, Blur DOF, Sumber & Game Overlay">⚙</button>
         <button id="btn-close-lyrics" class="icon-btn" title="Tutup Lirik (L)">✕</button>
       </div>
     </div>
@@ -54,10 +55,10 @@
     <div id="lyrics-controls-drawer" class="lyrics-controls-drawer hidden">
       <div class="setting-row">
         <div class="setting-head">
-          <label for="lyrics-candidate-select">Sumber / Versi Lirik</label>
+          <label for="lyrics-candidate-select">Sumber / Versi Lirik (Better Lyrics Engine)</label>
         </div>
         <select id="lyrics-candidate-select" class="select-input full-width">
-          <option value="">Otomatis (Terbaik)</option>
+          <option value="">Otomatis (Skor Tertinggi)</option>
         </select>
       </div>
       <div class="setting-row">
@@ -84,6 +85,37 @@
           <span id="lyric-offset-val" class="freq-readout">0.0s</span>
           <button id="btn-lyric-offset-plus" class="icon-btn" title="Mundurkan Lirik +0.5s">+0.5s</button>
         </div>
+      </div>
+
+      <div class="divider"></div>
+      <div class="section-label">Game Overlay (Transparan Tanpa Background)</div>
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="overlay-pos-select">Posisi Overlay</label>
+          <select id="overlay-pos-select" class="select-input compact-select">
+            <option value="top" selected>Atas (Top)</option>
+            <option value="bottom">Bawah (Bottom)</option>
+            <option value="center">Tengah (Center)</option>
+          </select>
+        </div>
+      </div>
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="overlay-scale-slider">Ukuran Teks Overlay</label>
+          <input id="overlay-scale-num" class="num-input" type="number" min="0.7" max="2.2" step="0.05" value="1.15">
+        </div>
+        <input id="overlay-scale-slider" type="range" min="0.7" max="2.2" step="0.05" value="1.15">
+      </div>
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="overlay-opacity-slider">Opasitas Teks Overlay</label>
+          <input id="overlay-opacity-num" class="num-input" type="number" min="0.3" max="1.0" step="0.05" value="0.95">
+        </div>
+        <input id="overlay-opacity-slider" type="range" min="0.3" max="1.0" step="0.05" value="0.95">
+      </div>
+      <div class="toggle-grid">
+        <label class="toggle-card"><input id="overlay-prevnext-toggle" type="checkbox" checked><span>Baris Prev/Next</span></label>
+        <label class="toggle-card"><input id="overlay-clickthrough-toggle" type="checkbox"><span>Tembus Klik Game</span></label>
       </div>
     </div>
 
@@ -241,6 +273,7 @@
         </div>
 
         <div class="toggle-grid">
+          <label class="toggle-card"><input id="vis-enabled-toggle" type="checkbox" checked><span>Visualizer Aktif</span></label>
           <label class="toggle-card"><input id="eco-mode-toggle" type="checkbox"><span>Eco Mode (Hemat)</span></label>
         </div>
       </div>
@@ -665,6 +698,8 @@
         <option value="ocean">Ocean</option>
       </select>
 
+      <button id="btn-vis-power" class="btn btn-secondary btn-sm overlay-active" title="Matikan / Nyalakan Visualizer agar Laptop Ringan (V)">Vis</button>
+      <button id="btn-hud-overlay" class="btn btn-secondary btn-sm" title="Game Lyrics Overlay Transparan (G)">Overlay</button>
       <button id="btn-lyrics-toggle" class="btn btn-secondary btn-sm" title="Panel Lirik (L)">Lirik (L)</button>
       <button id="btn-toggle-panel" class="btn btn-primary btn-sm" title="Pengaturan Studio (S)">Studio (S)</button>
       <button id="btn-fullscreen" class="icon-btn" title="Fullscreen (F)">⛶</button>
