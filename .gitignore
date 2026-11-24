@@ -1,0 +1,16 @@
+# Temporary and cache folders
+.desktop-profile/
+desktop-rust/target/
+node_modules/
+
+# OS and editor files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+*.log

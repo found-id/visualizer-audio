@@ -1,0 +1,678 @@
+<!DOCTYPE html>
+<html lang="id" translate="no" data-ui-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="google" content="notranslate">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cobra Audio</title>
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Dynamic SVG Filter for Liquid Glass Refraction & Chromatic Aberration -->
+  <svg class="svg-filters" aria-hidden="true">
+    <defs>
+      <filter id="liquid-glass-filter" x="-15%" y="-15%" width="130%" height="130%" color-interpolation-filters="sRGB">
+        <feTurbulence id="lg-turbulence" type="fractalNoise" baseFrequency="0.012" numOctaves="2" seed="3" result="noise" />
+        <feDisplacementMap id="lg-displace" in="SourceGraphic" in2="noise" scale="18" xChannelSelector="R" yChannelSelector="G" result="displaced" />
+        <feOffset id="lg-chroma-r" in="displaced" dx="1.5" dy="0" result="r-shift" />
+        <feOffset id="lg-chroma-b" in="displaced" dx="-1.5" dy="0" result="b-shift" />
+        <feColorMatrix in="r-shift" type="matrix" values="1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0" result="r-only" />
+        <feColorMatrix in="displaced" type="matrix" values="0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0" result="g-only" />
+        <feColorMatrix in="b-shift" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0" result="b-only" />
+        <feBlend in="r-only" in2="g-only" mode="screen" result="rg" />
+        <feBlend in="rg" in2="b-only" mode="screen" result="rgb-combined" />
+      </filter>
+    </defs>
+  </svg>
+
+  <canvas id="visualizer"></canvas>
+
+  <!-- Live Synchronized Lyrics Overlay (Cinema Subtitle / Card Mode) -->
+  <div id="lyrics-cinema" class="lyrics-cinema hidden">
+    <div id="lyric-prev" class="lyric-line-prev"></div>
+    <div id="lyric-curr" class="lyric-line-curr">♪ Menunggu lirik...</div>
+    <div id="lyric-next" class="lyric-line-next"></div>
+  </div>
+
+  <!-- Expandable Lyrics Panel (Spotify / YT Music Style) -->
+  <aside id="lyrics-panel" class="lyrics-panel glass-surface hidden">
+    <div class="resize-handle resize-handle-right" data-resize-target="lyrics-panel" data-resize-dir="right" title="Geser untuk ubah lebar"></div>
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>Lyrics</h2>
+        <span id="lyrics-status-badge" class="freq-readout">LRCLIB Sync</span>
+      </div>
+      <div class="header-actions">
+        <button id="btn-lyrics-refresh" class="icon-btn" title="Refresh Lirik & Metadata Lagu">↻</button>
+        <button id="btn-lyrics-cinema-toggle" class="icon-btn" title="Toggle Subtitle Cinema">CC</button>
+        <button id="btn-lyrics-settings-toggle" class="icon-btn" title="Atur Scale, Blur DOF & Sumber Lirik">⚙</button>
+        <button id="btn-close-lyrics" class="icon-btn" title="Tutup Lirik (L)">✕</button>
+      </div>
+    </div>
+
+    <div id="lyrics-controls-drawer" class="lyrics-controls-drawer hidden">
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="lyrics-candidate-select">Sumber / Versi Lirik</label>
+        </div>
+        <select id="lyrics-candidate-select" class="select-input full-width">
+          <option value="">Otomatis (Terbaik)</option>
+        </select>
+      </div>
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="lyric-scale-slider">Scale Text Lirik</label>
+          <input id="lyric-scale-num" class="num-input" type="number" min="0.7" max="2.0" step="0.05" value="1.05">
+        </div>
+        <input id="lyric-scale-slider" type="range" min="0.7" max="1.8" step="0.05" value="1.05">
+      </div>
+      <div class="setting-row">
+        <div class="setting-head">
+          <label for="lyric-dof-slider">Intensitas Blur DOF</label>
+          <input id="lyric-dof-num" class="num-input" type="number" min="0" max="3.0" step="0.1" value="1.0">
+        </div>
+        <input id="lyric-dof-slider" type="range" min="0" max="2.5" step="0.1" value="1.0">
+      </div>
+      <div class="lyric-offset-bar">
+        <label class="inline-check">
+          <input id="lyric-word-anim-toggle" type="checkbox" checked>
+          <span>Animasi Per Kata</span>
+        </label>
+        <div class="header-actions">
+          <button id="btn-lyric-offset-minus" class="icon-btn" title="Majukan Lirik -0.5s">-0.5s</button>
+          <span id="lyric-offset-val" class="freq-readout">0.0s</span>
+          <button id="btn-lyric-offset-plus" class="icon-btn" title="Mundurkan Lirik +0.5s">+0.5s</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="lyrics-search-bar">
+      <input id="lyrics-query-input" class="text-input" type="text" placeholder="Cari manual judul / artis lirik...">
+      <button id="btn-lyrics-search" class="btn btn-secondary btn-sm">Cari</button>
+    </div>
+    <div id="lyrics-scroll-body" class="lyrics-scroll-body">
+      <div class="lyrics-empty">Putar lagu untuk menampilkan lirik tersinkronisasi otomatis.</div>
+    </div>
+  </aside>
+
+  <!-- Fallback Modal if Auto-Bridge is offline and user clicks manual capture -->
+  <div id="empty-state" class="empty-state hidden">
+    <div class="empty-card glass-surface">
+      <div class="eyebrow">Cobra Audio</div>
+      <h1>Pilih Sumber Audio</h1>
+      <p>Gunakan Auto Loopback Bridge (tanpa izin browser) atau tangkap langsung melalui browser.</p>
+      <div class="primary-actions">
+        <button id="btn-start-auto" class="btn btn-primary">Auto Internal (Bridge)</button>
+        <button id="btn-start-system" class="btn btn-secondary">Browser Share Audio</button>
+        <button id="btn-start-mic" class="btn btn-secondary">Input / Stereo Mix</button>
+      </div>
+      <p id="error-banner" class="error-banner hidden"></p>
+    </div>
+  </div>
+
+  <!-- Compact Studio Panel -->
+  <aside id="studio-panel" class="studio-panel glass-surface hidden">
+    <div class="resize-handle resize-handle-left" data-resize-target="studio-panel" data-resize-dir="left" title="Geser untuk ubah lebar"></div>
+    <div class="panel-header">
+      <div class="panel-title-group">
+        <h2>Studio</h2>
+        <span id="freq-readout" class="freq-readout">0 Hz – 20.0 kHz</span>
+      </div>
+      <div class="header-actions">
+        <select id="ui-theme-select" class="select-input compact-select" title="Gaya UI">
+          <option value="dark">Claude Dark</option>
+          <option value="light">Claude Light</option>
+          <option value="liquid">Liquid Glass</option>
+        </select>
+        <button id="btn-vis-theme" class="icon-btn" title="Toggle Visualizer Dark/Light Canvas">☀</button>
+        <button id="btn-close-panel" class="icon-btn" title="Tutup (S)">✕</button>
+      </div>
+    </div>
+
+    <nav class="panel-tabs" role="tablist">
+      <button class="tab-btn active" data-tab="audio">Audio</button>
+      <button class="tab-btn" data-tab="visual">Visual</button>
+      <button class="tab-btn" data-tab="fx">FX &amp; Cam</button>
+      <button class="tab-btn" data-tab="glass">Glass</button>
+      <button class="tab-btn" data-tab="color">Warna</button>
+      <button class="tab-btn" data-tab="presets">Preset</button>
+    </nav>
+
+    <div class="panel-body">
+      <!-- TAB: AUDIO -->
+      <div class="tab-pane active" data-pane="audio">
+        <div class="setting-row">
+          <div class="setting-head"><label>Sumber Tangkap Audio</label></div>
+          <div class="source-switch-row">
+            <button id="btn-src-auto" class="btn btn-primary btn-sm">Auto (WASAPI)</button>
+            <button id="btn-src-browser" class="btn btn-secondary btn-sm">Browser Tab</button>
+            <button id="btn-src-mic" class="btn btn-secondary btn-sm">Input/Mic</button>
+          </div>
+          <select id="device-select" class="select-input full-width hidden" title="Perangkat Input"></select>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="min-freq-slider">Min Freq (Hz)</label>
+            <input id="min-freq-num" class="num-input" type="number" step="5" value="0">
+          </div>
+          <input id="min-freq-slider" type="range" min="-500" max="1000" step="5" value="0">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="max-freq-slider">Max Freq (Hz)</label>
+            <input id="max-freq-num" class="num-input" type="number" step="100" value="20000">
+          </div>
+          <input id="max-freq-slider" type="range" min="1000" max="24000" step="250" value="20000">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="gain-slider">Gain</label>
+            <input id="gain-num" class="num-input" type="number" step="0.1" value="1.9">
+          </div>
+          <input id="gain-slider" type="range" min="0.2" max="8.0" step="0.1" value="1.9">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="tilt-slider">Treble Tilt</label>
+            <input id="tilt-num" class="num-input" type="number" step="0.05" value="0.60">
+          </div>
+          <input id="tilt-slider" type="range" min="0.0" max="2.0" step="0.05" value="0.60">
+        </div>
+
+        <div class="divider"></div>
+        <div class="section-label">Smoothing Lanjutan</div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="smooth-slider">FFT Smoothing</label>
+            <input id="smooth-num" class="num-input" type="number" step="0.02" min="0" max="0.98" value="0.72">
+          </div>
+          <input id="smooth-slider" type="range" min="0.0" max="0.96" step="0.02" value="0.72">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="attack-slider">Attack Speed (Naik)</label>
+            <input id="attack-num" class="num-input" type="number" step="0.05" min="0.05" max="1" value="0.65">
+          </div>
+          <input id="attack-slider" type="range" min="0.05" max="1.0" step="0.05" value="0.65">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="release-slider">Release Smooth (Turun)</label>
+            <input id="release-num" class="num-input" type="number" step="0.02" min="0.05" max="0.98" value="0.78">
+          </div>
+          <input id="release-slider" type="range" min="0.05" max="0.96" step="0.02" value="0.78">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="spatial-slider">Spatial Smooth (Antar Bar)</label>
+            <input id="spatial-num" class="num-input" type="number" step="1" min="0" max="5" value="1">
+          </div>
+          <input id="spatial-slider" type="range" min="0" max="5" step="1" value="1">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="fps-num">FPS Limit (0 = Native)</label>
+            <input id="fps-num" class="num-input" type="number" min="0" max="240" step="1" value="0">
+          </div>
+          <input id="fps-slider" type="range" min="0" max="144" step="6" value="0">
+        </div>
+
+        <div class="divider"></div>
+        <div class="section-label">Optimasi Performa (CPU / GPU)</div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="dpr-slider">Render Scale (DPR)</label>
+            <input id="dpr-num" class="num-input" type="number" min="0.5" max="2.0" step="0.1" value="1.5">
+          </div>
+          <input id="dpr-slider" type="range" min="0.5" max="2.0" step="0.1" value="1.5">
+        </div>
+
+        <div class="toggle-grid">
+          <label class="toggle-card"><input id="eco-mode-toggle" type="checkbox"><span>Eco Mode (Hemat)</span></label>
+        </div>
+      </div>
+
+      <!-- TAB: VISUAL & BACKGROUND -->
+      <div class="tab-pane" data-pane="visual">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="bars-slider">Jumlah Bar</label>
+            <input id="bars-num" class="num-input" type="number" min="16" max="320" step="4" value="104">
+          </div>
+          <input id="bars-slider" type="range" min="24" max="220" step="4" value="104">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="thickness-slider">Ketebalan Bar</label>
+            <input id="thickness-num" class="num-input" type="number" min="0.1" max="1.0" step="0.02" value="0.52">
+          </div>
+          <input id="thickness-slider" type="range" min="0.15" max="0.95" step="0.02" value="0.52">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="height-slider">Tinggi Maksimal</label>
+            <input id="height-num" class="num-input" type="number" min="0.1" max="0.9" step="0.01" value="0.38">
+          </div>
+          <input id="height-slider" type="range" min="0.15" max="0.48" step="0.01" value="0.38">
+        </div>
+
+        <div class="toggle-grid">
+          <label class="toggle-card"><input id="mirror-toggle" type="checkbox" checked><span>Mirror</span></label>
+          <label class="toggle-card"><input id="ruler-toggle" type="checkbox" checked><span>Ruler (Hz)</span></label>
+          <label class="toggle-card"><input id="peak-toggle" type="checkbox" checked><span>Peak Dots</span></label>
+          <label class="toggle-card"><input id="particles-toggle" type="checkbox" checked><span>Particles</span></label>
+          <label class="toggle-card"><input id="canvas-title-toggle" type="checkbox" checked><span>Judul di Canvas</span></label>
+          <label class="toggle-card"><input id="cinema-lyrics-toggle" type="checkbox" checked><span>Subtitle Lirik</span></label>
+        </div>
+
+        <div class="divider"></div>
+        <div class="section-label">Background &amp; Cover Lagu</div>
+
+        <div class="setting-row">
+          <select id="bg-select" class="select-input full-width">
+            <option value="cover" selected>Cover Lagu Sedang Diputar (Auto)</option>
+            <option value="pulse">Dynamic Bass Pulse</option>
+            <option value="nebula">Aurora Nebula</option>
+            <option value="starfield">Reactive Starfield</option>
+            <option value="solid">Solid (Mengikuti Canvas Mode)</option>
+            <option value="image">Custom Image (Upload / URL)</option>
+          </select>
+        </div>
+
+        <div class="bg-image-controls">
+          <div class="preset-create-row">
+            <input id="bg-url-input" class="text-input" type="url" placeholder="Paste link gambar (https://...)">
+            <button id="btn-bg-url" class="btn btn-secondary btn-sm">Pakai</button>
+          </div>
+          <div class="preset-create-row">
+            <label class="btn btn-secondary btn-sm file-btn">
+              Upload Gambar
+              <input id="bg-file-input" type="file" accept="image/*" hidden>
+            </label>
+            <button id="btn-bg-clear" class="btn btn-ghost btn-sm">Reset ke Cover</button>
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="bg-blur-slider">Blur Cover / Gambar (px)</label>
+            <input id="bg-blur-num" class="num-input" type="number" min="0" max="80" step="1" value="18">
+          </div>
+          <input id="bg-blur-slider" type="range" min="0" max="60" step="1" value="18">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="bg-tint-slider">Tint Overlay (Hitam / Putih)</label>
+            <input id="bg-tint-num" class="num-input" type="number" min="0" max="1" step="0.02" value="0.58">
+          </div>
+          <div class="tint-row">
+            <select id="bg-tint-color" class="select-input compact-select">
+              <option value="black" selected>Hitam</option>
+              <option value="white">Putih</option>
+            </select>
+            <input id="bg-tint-slider" type="range" min="0" max="1" step="0.02" value="0.58">
+          </div>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="bg-vignette-slider">Vignette</label>
+            <input id="bg-vignette-num" class="num-input" type="number" min="0" max="1" step="0.02" value="0.55">
+          </div>
+          <input id="bg-vignette-slider" type="range" min="0" max="1" step="0.02" value="0.55">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="pulse-bright-slider">Cahaya Bass Pulse</label>
+            <input id="pulse-bright-num" class="num-input" type="number" min="0" max="2.5" step="0.05" value="1.0">
+          </div>
+          <input id="pulse-bright-slider" type="range" min="0" max="2.5" step="0.05" value="1.0">
+        </div>
+
+        <div class="divider"></div>
+        <div class="section-label">Posisi Ruler (Hz)</div>
+        <div class="setting-row">
+          <div class="tint-row">
+            <select id="ruler-pos-select" class="select-input compact-select">
+              <option value="bottom" selected>Bawah</option>
+              <option value="center">Tengah</option>
+              <option value="top">Atas</option>
+              <option value="custom">Custom Y%</option>
+            </select>
+            <input id="ruler-y-slider" type="range" min="8" max="92" step="1" value="84">
+            <input id="ruler-y-num" class="num-input" type="number" min="5" max="95" step="1" value="84">
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: FX & CAMERA -->
+      <div class="tab-pane" data-pane="fx">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="glow-slider">Deep Glow (px)</label>
+            <input id="glow-num" class="num-input" type="number" min="0" max="100" step="1" value="28">
+          </div>
+          <input id="glow-slider" type="range" min="0" max="72" step="1" value="28">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="glow-spread-slider">Glow Thickness</label>
+            <input id="glow-spread-num" class="num-input" type="number" min="1" max="5" step="0.1" value="1.9">
+          </div>
+          <input id="glow-spread-slider" type="range" min="1.0" max="4.0" step="0.1" value="1.9">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="motion-blur-slider">Motion Blur</label>
+            <input id="motion-blur-num" class="num-input" type="number" min="0" max="0.95" step="0.02" value="0.22">
+          </div>
+          <input id="motion-blur-slider" type="range" min="0" max="0.9" step="0.02" value="0.22">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="shake-slider">Bass Shake</label>
+            <input id="shake-num" class="num-input" type="number" min="0" max="5" step="0.1" value="1.0">
+          </div>
+          <input id="shake-slider" type="range" min="0" max="3.5" step="0.1" value="1.0">
+        </div>
+
+        <div class="divider"></div>
+        <div class="toggle-grid">
+          <label class="toggle-card"><input id="rgb-beat-toggle" type="checkbox" checked><span>RGB Beat Flash</span></label>
+          <label class="toggle-card"><input id="wiggle-toggle" type="checkbox"><span>Camera Wiggle</span></label>
+          <label class="toggle-card"><input id="beat-zoom-toggle" type="checkbox" checked><span>Beat Zoom</span></label>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="zoom-amp-slider">Beat Zoom Amount (%)</label>
+            <input id="zoom-amp-num" class="num-input" type="number" min="0" max="35" step="0.5" value="6.5">
+          </div>
+          <input id="zoom-amp-slider" type="range" min="0" max="25" step="0.5" value="6.5">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="zoom-smooth-slider">Zoom Smooth / Recovery</label>
+            <input id="zoom-smooth-num" class="num-input" type="number" min="0.5" max="0.96" step="0.02" value="0.82">
+          </div>
+          <input id="zoom-smooth-slider" type="range" min="0.5" max="0.96" step="0.02" value="0.82">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="zoom-thresh-slider">Beat Zoom Sensitivitas</label>
+            <input id="zoom-thresh-num" class="num-input" type="number" min="0.02" max="0.4" step="0.01" value="0.06">
+          </div>
+          <input id="zoom-thresh-slider" type="range" min="0.02" max="0.3" step="0.01" value="0.06">
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="wiggle-amp-slider">Wiggle Amount (px)</label>
+            <input id="wiggle-amp-num" class="num-input" type="number" min="0" max="80" step="1" value="14">
+          </div>
+          <input id="wiggle-amp-slider" type="range" min="0" max="50" step="1" value="14">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="wiggle-speed-slider">Wiggle Speed</label>
+            <input id="wiggle-speed-num" class="num-input" type="number" min="0.1" max="10" step="0.1" value="1.2">
+          </div>
+          <input id="wiggle-speed-slider" type="range" min="0.2" max="5.0" step="0.1" value="1.2">
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="wiggle-rot-slider">Wiggle Tilt (deg)</label>
+            <input id="wiggle-rot-num" class="num-input" type="number" min="0" max="15" step="0.1" value="1.4">
+          </div>
+          <input id="wiggle-rot-slider" type="range" min="0" max="8" step="0.2" value="1.4">
+        </div>
+      </div>
+
+      <!-- TAB: LIQUID GLASS PLAYGROUND -->
+      <div class="tab-pane" data-pane="glass">
+        <div class="setting-head">
+          <span class="section-label">Liquid Glass Playground</span>
+          <button id="btn-activate-glass" class="btn btn-primary btn-sm">Aktifkan</button>
+        </div>
+
+        <div class="setting-row">
+          <div class="setting-head"><label>Blur Amount</label><input id="lg-blur-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.24"></div>
+          <input id="lg-blur-slider" type="range" min="0" max="1" step="0.02" value="0.24">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Refraction</label><input id="lg-refract-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.69"></div>
+          <input id="lg-refract-slider" type="range" min="0" max="1" step="0.02" value="0.69">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Chrom. Aberration</label><input id="lg-chroma-num" class="num-input" type="number" step="0.01" min="0" max="1" value="0.15"></div>
+          <input id="lg-chroma-slider" type="range" min="0" max="1" step="0.01" value="0.15">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Edge Highlight</label><input id="lg-edge-num" class="num-input" type="number" step="0.01" min="0" max="1" value="0.25"></div>
+          <input id="lg-edge-slider" type="range" min="0" max="1" step="0.01" value="0.25">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Specular</label><input id="lg-specular-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.35"></div>
+          <input id="lg-specular-slider" type="range" min="0" max="1" step="0.02" value="0.35">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Fresnel</label><input id="lg-fresnel-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.80"></div>
+          <input id="lg-fresnel-slider" type="range" min="0" max="1" step="0.02" value="0.80">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Distortion</label><input id="lg-distort-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.22"></div>
+          <input id="lg-distort-slider" type="range" min="0" max="1" step="0.02" value="0.22">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Corner Radius</label><input id="lg-radius-num" class="num-input" type="number" step="1" min="4" max="48" value="22"></div>
+          <input id="lg-radius-slider" type="range" min="4" max="48" step="1" value="22">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Z-Radius (Depth)</label><input id="lg-zradius-num" class="num-input" type="number" step="1" min="0" max="60" value="32"></div>
+          <input id="lg-zradius-slider" type="range" min="0" max="60" step="1" value="32">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Opacity</label><input id="lg-opacity-num" class="num-input" type="number" step="0.02" min="0.05" max="1" value="0.38"></div>
+          <input id="lg-opacity-slider" type="range" min="0.05" max="1" step="0.02" value="0.38">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Saturation</label><input id="lg-sat-num" class="num-input" type="number" step="0.05" min="0" max="3" value="1.45"></div>
+          <input id="lg-sat-slider" type="range" min="0" max="3" step="0.05" value="1.45">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Brightness</label><input id="lg-bright-num" class="num-input" type="number" step="0.05" min="0.4" max="2" value="1.08"></div>
+          <input id="lg-bright-slider" type="range" min="0.4" max="2" step="0.05" value="1.08">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Shadow Opacity</label><input id="lg-shadow-op-num" class="num-input" type="number" step="0.02" min="0" max="1" value="0.35"></div>
+          <input id="lg-shadow-op-slider" type="range" min="0" max="1" step="0.02" value="0.35">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Shadow Spread</label><input id="lg-shadow-sp-num" class="num-input" type="number" step="1" min="0" max="60" value="24"></div>
+          <input id="lg-shadow-sp-slider" type="range" min="0" max="60" step="1" value="24">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Bevel Mode</label><input id="lg-bevel-num" class="num-input" type="number" step="0.05" min="0" max="1" value="0.35"></div>
+          <input id="lg-bevel-slider" type="range" min="0" max="1" step="0.05" value="0.35">
+        </div>
+      </div>
+
+      <!-- TAB: COLOR -->
+      <div class="tab-pane" data-pane="color">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label>Warna Aksen UI</label>
+            <input id="ui-accent-picker" class="accent-color-input" type="color" value="#6366f1">
+          </div>
+          <div class="accent-swatches">
+            <button class="mini-swatch" data-accent="#6366f1" style="background:#6366f1" title="Indigo"></button>
+            <button class="mini-swatch" data-accent="#d97757" style="background:#d97757" title="Terracotta"></button>
+            <button class="mini-swatch" data-accent="#10b981" style="background:#10b981" title="Emerald"></button>
+            <button class="mini-swatch" data-accent="#06b6d4" style="background:#06b6d4" title="Cyan"></button>
+            <button class="mini-swatch" data-accent="#ec4899" style="background:#ec4899" title="Pink"></button>
+            <button class="mini-swatch" data-accent="#f59e0b" style="background:#f59e0b" title="Amber"></button>
+            <button class="mini-swatch" data-accent="#ffffff" style="background:#ffffff" title="White"></button>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+        <div class="setting-row">
+          <div class="setting-head"><label>Tema Visualizer</label></div>
+          <div id="swatch-grid" class="swatch-grid"></div>
+        </div>
+
+        <div class="divider"></div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label>Custom Gradient Visualizer</label>
+            <label class="inline-check">
+              <input id="custom-color-toggle" type="checkbox">
+              <span>Aktifkan</span>
+            </label>
+          </div>
+          <div id="gradient-preview" class="gradient-preview"></div>
+          <div class="color-pickers">
+            <label class="color-chip"><span>Start</span><input id="color-start" type="color" value="#22d3ee"></label>
+            <label class="color-chip"><span>Mid</span><input id="color-mid" type="color" value="#34d399"></label>
+            <label class="color-chip"><span>End</span><input id="color-end" type="color" value="#a78bfa"></label>
+            <label class="color-chip"><span>Glow</span><input id="color-glow" type="color" value="#34d399"></label>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: PRESETS (CRUD + SELECTIVE APPLY) -->
+      <div class="tab-pane" data-pane="presets">
+        <div class="section-label">Terapkan Bagian Preset:</div>
+        <div class="toggle-grid">
+          <label class="toggle-card"><input id="apply-vis-check" type="checkbox" checked><span>Visualizer &amp; FX</span></label>
+          <label class="toggle-card"><input id="apply-ui-check" type="checkbox" checked><span>UI &amp; Liquid Glass</span></label>
+          <label class="toggle-card"><input id="apply-bg-check" type="checkbox" checked><span>Background</span></label>
+          <label class="toggle-card"><input id="apply-color-check" type="checkbox" checked><span>Warna &amp; Tema</span></label>
+        </div>
+
+        <div class="divider"></div>
+        <div id="preset-list" class="preset-list"></div>
+
+        <div class="divider"></div>
+        <div class="setting-row">
+          <div class="setting-head"><label for="preset-name-input">Simpan Preset Baru</label></div>
+          <div class="preset-create-row">
+            <input id="preset-name-input" class="text-input" type="text" placeholder="Nama preset baru...">
+            <button id="btn-preset-save" class="btn btn-primary btn-sm">Simpan</button>
+          </div>
+        </div>
+        <div class="preset-io-row">
+          <button id="btn-preset-export" class="btn btn-secondary btn-sm">Export Preset (.json)</button>
+          <label class="btn btn-secondary btn-sm file-btn">
+            Load / Import (.json)
+            <input id="preset-import-input" type="file" accept=".json,application/json" hidden>
+          </label>
+        </div>
+        <p id="preset-feedback" class="preset-feedback"></p>
+      </div>
+    </div>
+  </aside>
+
+  <!-- YouTube Music / Spotify Style Media Player & Visualizer Dock -->
+  <div id="hud" class="hud player-dock glass-surface">
+    <div id="player-loading-bar" class="player-loading-bar hidden"></div>
+    <!-- Left: Now Playing Cover + Title/Artist -->
+    <div class="player-track">
+      <div id="cover-thumb-wrap" class="cover-thumb-wrap" title="Klik untuk jadikan Cover sebagai Background">
+        <img id="player-cover" class="player-cover hidden" alt="Cover">
+        <div id="player-cover-fallback" class="player-cover-fallback">♪</div>
+        <span id="status-dot" class="status-dot"></span>
+      </div>
+      <div class="track-info">
+        <div id="player-title" class="player-title">Menunggu musik...</div>
+        <div class="player-sub">
+          <span id="player-artist">Putar lagu di Spotify / Browser</span>
+          <span class="dot-sep">•</span>
+          <span id="status-text" class="status-text">Idle</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center: Transport Controls + Seek Progress Bar -->
+    <div class="player-center">
+      <div class="transport-btns">
+        <button id="btn-prev" class="transport-btn" title="Sebelumnya" aria-label="Sebelumnya">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg>
+        </button>
+        <button id="btn-playpause" class="transport-btn play-btn" title="Play / Pause (Space)" aria-label="Play / Pause">
+          <svg id="icon-play" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          <svg id="icon-pause" class="hidden" viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+        </button>
+        <button id="btn-next" class="transport-btn" title="Selanjutnya" aria-label="Selanjutnya">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg>
+        </button>
+      </div>
+      <div class="timeline-row">
+        <span id="time-curr" class="time-label">0:00</span>
+        <input id="seek-slider" class="seek-slider" type="range" min="0" max="100" step="0.1" value="0">
+        <span id="time-total" class="time-label">0:00</span>
+      </div>
+    </div>
+
+    <!-- Right: Visualizer Mode, Lyrics, Studio, Fullscreen -->
+    <div class="player-right">
+      <select id="mode-select" class="select-input compact-select" title="Mode Visual">
+        <option value="spectrum" selected>Spectrum</option>
+        <option value="waveform">Waveform</option>
+        <option value="ribbon">Silk Ribbon</option>
+        <option value="radial">Radial Ring</option>
+        <option value="reflection">Reflection</option>
+      </select>
+
+      <select id="color-select" class="select-input compact-select" title="Tema Warna">
+        <option value="white">White</option>
+        <option value="aurora" selected>Aurora</option>
+        <option value="cyberpunk">Cyberpunk</option>
+        <option value="rainbow">Rainbow</option>
+        <option value="sunset">Sunset</option>
+        <option value="ice">Ice Cyan</option>
+        <option value="violet">Violet</option>
+        <option value="amber">Amber</option>
+        <option value="emerald">Emerald</option>
+        <option value="crimson">Crimson</option>
+        <option value="gold">Gold</option>
+        <option value="ocean">Ocean</option>
+      </select>
+
+      <button id="btn-lyrics-toggle" class="btn btn-secondary btn-sm" title="Panel Lirik (L)">Lirik (L)</button>
+      <button id="btn-toggle-panel" class="btn btn-primary btn-sm" title="Pengaturan Studio (S)">Studio (S)</button>
+      <button id="btn-fullscreen" class="icon-btn" title="Fullscreen (F)">⛶</button>
+      <button id="btn-hide-hud" class="icon-btn" title="Sembunyikan UI (H)">👁</button>
+      <button id="btn-stop" class="icon-btn hidden" title=" Ganti Sumber Audio">⚙</button>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
