@@ -40,12 +40,17 @@ let latestMedia = {
 let smtcProc = null;
 let audioProc = null;
 let overlayProc = null;
+let lastStudioHeartbeatAt = Date.now();
+let mediaScope = 'music';
+let latestSessions = [];
 const lyricsCache = new Map();
+const inFlightLyrics = new Map();
 
 // Live state for standalone transparent game lyrics overlay
 let overlayState = {
   active: false,
   playing: false,
+  loading: false,
   trackKey: '',
   title: '',
   artist: '',
@@ -58,10 +63,26 @@ let overlayState = {
   fromClient: false,
   config: {
     pos: 'top', // 'top' | 'bottom' | 'center'
+    barWidth: 460,
     scale: 1.15,
     opacity: 0.95,
     showPrevNext: true,
+    dofBlur: true,
+    lyricsStyle: 'cinema',
     clickThrough: false,
+    showBg: true,
+    bgColor: '#0f1014',
+    bgOpacity: 0.68,
+    showOutline: true,
+    outlineColor: '#ffffff',
+    textColor: '#ffffff',
+    activeColor: '#7dd3fc',
+    textShadow: true,
+    shadowStrength: 0.65,
+    textGlow: false,
+    textOutline: false,
+    showControls: true,
+    resetPosToken: 0,
   },
 };
 
@@ -105,13 +126,31 @@ function startSmtcWorker() {
       if (line.startsWith('SMTC_JSON:')) {
         try {
           const parsed = JSON.parse(line.slice(10));
+          if (Array.isArray(parsed.sessions)) {
+            latestSessions = parsed.sessions;
+          }
           if (parsed.active) {
+            const prevTrackKey = latestMedia.trackKey;
             const cover = parsed.cover || (parsed.trackKey === latestMedia.trackKey ? latestMedia.cover : '');
             latestMedia = {
               ...parsed,
               cover,
               updatedAt: Date.now(),
             };
+            if (parsed.trackKey && parsed.trackKey !== prevTrackKey) {
+              overlayState.trackKey = parsed.trackKey;
+              overlayState.title = parsed.title || '';
+              overlayState.artist = parsed.artist || '';
+              overlayState.prev = '';
+              overlayState.curr = 'Memuat lirik...';
+              overlayState.next = '';
+              overlayState.words = [];
+              overlayState.loading = true;
+              overlayState.fromClient = false;
+              if (isOverlayRunning()) {
+                syncServerOverlayFallback().catch(() => {});
+              }
+            }
           } else {
             latestMedia.active = false;
           }
@@ -624,73 +663,91 @@ async function findBestLyrics(title, artist, duration, forceFresh = false, album
   const meta = parseTrackMetadata(title, artist, album);
   const cacheKey = `${meta.cleanTitle}|${meta.cleanArtist}|${Math.round(targetDur / 5)}`;
   if (!forceFresh && lyricsCache.has(cacheKey)) return lyricsCache.get(cacheKey);
+  if (!forceFresh && inFlightLyrics.has(cacheKey)) return inFlightLyrics.get(cacheKey);
 
-  // Query Unison (Better Lyrics), LRCLIB (Exact + Search), and KuGou Legato in parallel!
-  const [unisonCand, lrclibList, kugouList] = await Promise.all([
-    fetchUnisonCandidate(meta, targetDur),
-    fetchLrclibCandidates(meta, targetDur),
-    fetchKugouLegatoCandidates(meta, targetDur),
-  ]);
+  const workPromise = (async () => {
+    let unisonCand = null;
+    let lrclibList = [];
+    let kugouList = [];
 
-  const all = [];
-  if (unisonCand) all.push(unisonCand);
-  all.push(...lrclibList);
-  all.push(...kugouList);
+    const unisonP = fetchUnisonCandidate(meta, targetDur).then((v) => (unisonCand = v)).catch(() => null);
+    const lrclibP = fetchLrclibCandidates(meta, targetDur).then((v) => (lrclibList = v || [])).catch(() => []);
+    const kugouP = fetchKugouLegatoCandidates(meta, targetDur).then((v) => (kugouList = v || [])).catch(() => []);
 
-  // Fallback to Lyrics.ovh only when all synced databases returned nothing
-  if (all.length === 0 && meta.cleanArtist) {
-    try {
-      const ovh = await fetchJsonHttps(
-        `https://api.lyrics.ovh/v1/${encodeURIComponent(meta.cleanArtist)}/${encodeURIComponent(meta.cleanTitle)}`,
-        {},
-        3000
-      );
-      if (ovh && ovh.lyrics) {
-        all.push({
-          source: 'Lyrics.ovh',
-          format: 'plain',
-          trackName: meta.cleanTitle,
-          artistName: meta.cleanArtist,
-          duration: targetDur,
-          synced: false,
-          richSync: false,
-          syncedLyrics: '',
-          plainLyrics: ovh.lyrics,
-        });
-      }
-    } catch (_) {}
-  }
+    const fastSynced = Promise.race([
+      lrclibP.then((arr) => (arr.some((x) => x.synced) ? 'lrclib' : null)),
+      unisonP.then((c) => (c && c.synced ? 'unison' : null)),
+    ]);
 
-  if (all.length === 0) {
-    const empty = { found: false, candidates: [] };
-    lyricsCache.set(cacheKey, empty);
-    return empty;
-  }
+    await Promise.race([
+      Promise.all([unisonP, lrclibP, kugouP]),
+      fastSynced.then((hit) => new Promise((r) => setTimeout(r, hit ? 550 : 2200))),
+    ]);
 
-  all.forEach((c) => {
-    c.score = Math.round(scoreLyricsCandidate(c, meta, targetDur));
+    const all = [];
+    if (unisonCand) all.push(unisonCand);
+    all.push(...lrclibList);
+    all.push(...kugouList);
+
+    if (all.length === 0 && meta.cleanArtist) {
+      try {
+        const ovh = await fetchJsonHttps(
+          `https://api.lyrics.ovh/v1/${encodeURIComponent(meta.cleanArtist)}/${encodeURIComponent(meta.cleanTitle)}`,
+          {},
+          2000
+        );
+        if (ovh && ovh.lyrics) {
+          all.push({
+            source: 'Lyrics.ovh',
+            format: 'plain',
+            trackName: meta.cleanTitle,
+            artistName: meta.cleanArtist,
+            duration: targetDur,
+            synced: false,
+            richSync: false,
+            syncedLyrics: '',
+            plainLyrics: ovh.lyrics,
+          });
+        }
+      } catch (_) {}
+    }
+
+    if (all.length === 0) {
+      const empty = { found: false, candidates: [] };
+      lyricsCache.set(cacheKey, empty);
+      return empty;
+    }
+
+    all.forEach((c) => {
+      c.score = Math.round(scoreLyricsCandidate(c, meta, targetDur));
+    });
+    all.sort((a, b) => b.score - a.score);
+
+    const topCandidates = all.slice(0, 10);
+    const best = topCandidates[0];
+    const output = {
+      found: true,
+      synced: best.synced,
+      richSync: Boolean(best.richSync),
+      format: best.format || (best.synced ? 'lrc' : 'plain'),
+      source: best.source,
+      trackName: best.trackName,
+      artistName: best.artistName,
+      duration: best.duration,
+      syncedLyrics: best.syncedLyrics || '',
+      ttmlLyrics: best.ttmlLyrics || '',
+      parsedLines: best.parsedLines || null,
+      plainLyrics: best.plainLyrics || '',
+      candidates: topCandidates,
+    };
+    lyricsCache.set(cacheKey, output);
+    return output;
+  })().finally(() => {
+    inFlightLyrics.delete(cacheKey);
   });
-  all.sort((a, b) => b.score - a.score);
 
-  const topCandidates = all.slice(0, 10);
-  const best = topCandidates[0];
-  const output = {
-    found: true,
-    synced: best.synced,
-    richSync: Boolean(best.richSync),
-    format: best.format || (best.synced ? 'lrc' : 'plain'),
-    source: best.source,
-    trackName: best.trackName,
-    artistName: best.artistName,
-    duration: best.duration,
-    syncedLyrics: best.syncedLyrics || '',
-    ttmlLyrics: best.ttmlLyrics || '',
-    parsedLines: best.parsedLines || null,
-    plainLyrics: best.plainLyrics || '',
-    candidates: topCandidates,
-  };
-  lyricsCache.set(cacheKey, output);
-  return output;
+  inFlightLyrics.set(cacheKey, workPromise);
+  return workPromise;
 }
 
 function isOverlayRunning() {
@@ -707,8 +764,25 @@ function startOverlayProcess() {
   });
   overlayProc.on('exit', () => {
     overlayProc = null;
+    // If Cobra Studio is already closed/hibernated and overlay was just closed, shut down bridge cleanly
+    if (Date.now() - lastStudioHeartbeatAt > 6000) {
+      shutdownAllAndExit();
+    }
   });
   return true;
+}
+
+function shutdownAllAndExit() {
+  try {
+    if (audioProc && !audioProc.killed) audioProc.kill();
+  } catch (_) {}
+  try {
+    if (smtcProc && !smtcProc.killed) smtcProc.kill();
+  } catch (_) {}
+  try {
+    if (overlayProc && !overlayProc.killed) overlayProc.kill();
+  } catch (_) {}
+  setTimeout(() => process.exit(0), 120);
 }
 
 function stopOverlayProcess() {
@@ -722,13 +796,20 @@ function stopOverlayProcess() {
 
 // Keep autonomous server lyrics synced when main UI isn't pushing overlay state
 async function syncServerOverlayFallback() {
+  if (!isOverlayRunning()) return;
   if (!latestMedia.active || !latestMedia.title) return;
-  if (Date.now() - overlayState.updatedAt < 1800 && overlayState.fromClient) return;
+  if (overlayState.fromClient && (Date.now() - overlayState.updatedAt < 1800 || Date.now() - lastStudioHeartbeatAt < 3500)) return;
 
   if (serverLyricsState.trackKey !== latestMedia.trackKey && !serverLyricsState.fetching) {
     serverLyricsState.trackKey = latestMedia.trackKey;
     serverLyricsState.fetching = true;
     serverLyricsState.lines = [];
+    overlayState.trackKey = latestMedia.trackKey;
+    overlayState.prev = '';
+    overlayState.curr = 'Memuat lirik...';
+    overlayState.next = '';
+    overlayState.words = [];
+    overlayState.loading = true;
     findBestLyrics(latestMedia.title, latestMedia.artist, latestMedia.duration, false, latestMedia.album)
       .then((res) => {
         if (serverLyricsState.trackKey !== latestMedia.trackKey) return;
@@ -738,6 +819,7 @@ async function syncServerOverlayFallback() {
       })
       .finally(() => {
         serverLyricsState.fetching = false;
+        overlayState.loading = false;
       });
   }
 
@@ -812,6 +894,7 @@ async function handleRequest(req, res) {
   const pathname = decodeURIComponent(parsedUrl.pathname);
 
   if (pathname.endsWith('/api/audio')) {
+    lastStudioHeartbeatAt = Date.now();
     const proxyReq = http.get('http://127.0.0.1:19848/audio', { timeout: 600 }, (pRes) => {
       let body = '';
       pRes.on('data', (c) => (body += c));
@@ -828,6 +911,7 @@ async function handleRequest(req, res) {
   }
 
   if (pathname.endsWith('/api/media')) {
+    lastStudioHeartbeatAt = Date.now();
     let pos = latestMedia.position;
     if (latestMedia.active && latestMedia.status === 'Playing') {
       const elapsed = (Date.now() - latestMedia.updatedAt) / 1000;
@@ -847,6 +931,8 @@ async function handleRequest(req, res) {
         trackKey: latestMedia.trackKey,
         coverVersion: latestMedia.coverVersion || 0,
         hasCover: Boolean(latestMedia.cover),
+        scope: mediaScope,
+        sessions: latestSessions,
       })
     );
     return;
@@ -867,8 +953,24 @@ async function handleRequest(req, res) {
   if (pathname.endsWith('/api/control')) {
     const cmd = parsedUrl.searchParams.get('cmd') || '';
     const pos = parsedUrl.searchParams.get('pos') || '0';
+    const val = parsedUrl.searchParams.get('val') || '';
     let ok = false;
-    if (['playpause', 'play', 'pause', 'next', 'prev', 'refresh'].includes(cmd)) {
+    if (cmd === 'scope' && val) {
+      mediaScope = val;
+      overlayState.prev = '';
+      overlayState.curr = 'Memuat lirik...';
+      overlayState.next = '';
+      overlayState.words = [];
+      overlayState.loading = true;
+      ok = sendSmtcCommand(`scope:${val}`);
+    } else if (['playpause', 'play', 'pause', 'next', 'prev', 'refresh'].includes(cmd)) {
+      if (cmd === 'next' || cmd === 'prev') {
+        overlayState.prev = '';
+        overlayState.curr = 'Memuat lirik...';
+        overlayState.next = '';
+        overlayState.words = [];
+        overlayState.loading = true;
+      }
       ok = sendSmtcCommand(cmd);
     } else if (cmd === 'seek') {
       const sec = parseFloat(pos);
@@ -934,16 +1036,24 @@ async function handleRequest(req, res) {
             serverLyricsState.offsetSec = p.offsetSec;
           }
           if (p.curr !== undefined) {
-            overlayState.active = Boolean(p.active);
-            overlayState.playing = Boolean(p.playing);
-            overlayState.title = p.title || '';
-            overlayState.artist = p.artist || '';
-            overlayState.prev = p.prev || '';
-            overlayState.curr = p.curr || '';
-            overlayState.next = p.next || '';
-            overlayState.words = Array.isArray(p.words) ? p.words : [];
-            overlayState.fromClient = true;
-            overlayState.updatedAt = Date.now();
+            const staleTrack =
+              Boolean(p.trackKey) &&
+              Boolean(latestMedia.trackKey) &&
+              p.trackKey !== latestMedia.trackKey;
+            if (!staleTrack) {
+              overlayState.active = Boolean(p.active);
+              overlayState.playing = Boolean(p.playing);
+              overlayState.loading = Boolean(p.loading);
+              overlayState.trackKey = p.trackKey || latestMedia.trackKey || '';
+              overlayState.title = p.title || '';
+              overlayState.artist = p.artist || '';
+              overlayState.prev = p.prev || '';
+              overlayState.curr = p.curr || '';
+              overlayState.next = p.next || '';
+              overlayState.words = Array.isArray(p.words) ? p.words : [];
+              overlayState.fromClient = true;
+              overlayState.updatedAt = Date.now();
+            }
           }
         } catch (_) {}
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -960,12 +1070,92 @@ async function handleRequest(req, res) {
   if (pathname.endsWith('/api/overlay-cover')) {
     const rgbaPath = path.join(WORKSPACE_DIR, '.overlay-cover.rgba');
     if (latestMedia.cover && fs.existsSync(rgbaPath)) {
-      res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' });
-      fs.createReadStream(rgbaPath).pipe(res);
-    } else {
-      res.writeHead(204);
-      res.end();
+      try {
+        const buf = fs.readFileSync(rgbaPath);
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Length': buf.length,
+          'Cache-Control': 'no-store',
+        });
+        res.end(buf);
+        return;
+      } catch (_) {}
     }
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  if (pathname.endsWith('/api/open-studio')) {
+    const focusScript = `
+      Add-Type @"
+      using System;
+      using System.Runtime.InteropServices;
+      using System.Text;
+      public class CobraFocus {
+        public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+        [DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+        [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+        [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+        [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+        public static bool FocusCobra() {
+          IntPtr found = IntPtr.Zero;
+          EnumWindows((hWnd, lParam) => {
+            if (!IsWindowVisible(hWnd)) return true;
+            var sb = new StringBuilder(256);
+            GetWindowText(hWnd, sb, 256);
+            string title = sb.ToString();
+            if (title == "Cobra Audio" || title.StartsWith("Cobra Audio -")) {
+              found = hWnd;
+              return false;
+            }
+            return true;
+          }, IntPtr.Zero);
+          if (found != IntPtr.Zero) {
+            if (IsIconic(found)) ShowWindow(found, 9);
+            else ShowWindow(found, 5);
+            keybd_event(0x12, 0, 0, UIntPtr.Zero);
+            SetForegroundWindow(found);
+            keybd_event(0x12, 0, 2, UIntPtr.Zero);
+            return true;
+          }
+          return false;
+        }
+      }
+"@
+      if ([CobraFocus]::FocusCobra()) { Write-Output "FOCUSED" } else { Write-Output "NOT_FOUND" }
+    `;
+    const ps = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', focusScript],
+      { windowsHide: true }
+    );
+    let out = '';
+    ps.stdout.on('data', (d) => (out += d.toString()));
+    ps.on('close', () => {
+      let ok = out.includes('FOCUSED');
+      if (!ok) {
+        const exeCandidates = ['Cobra Audio.exe', 'Audio Spectrum Studio.exe']
+          .map((n) => path.join(WORKSPACE_DIR, n))
+          .find((p) => fs.existsSync(p));
+        if (exeCandidates) {
+          try {
+            const child = spawn(exeCandidates, [], {
+              cwd: WORKSPACE_DIR,
+              detached: true,
+              stdio: 'ignore',
+            });
+            child.unref();
+            ok = true;
+          } catch (_) {}
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok }));
+    });
     return;
   }
 
@@ -976,21 +1166,44 @@ async function handleRequest(req, res) {
       .map((w) => `${cleanLine(w.text).replace(/\x1f/g, '')}\x1f${w.state || 0}`)
       .join('\t');
     const cfg = overlayState.config;
+    // Always use latestMedia (SMTC) as authoritative source for title/artist/playing to prevent track flicker
+    const authActive = latestMedia.active || overlayState.active;
+    const authPlaying = latestMedia.active ? latestMedia.status === 'Playing' : overlayState.playing;
+    const authTitle = latestMedia.active && latestMedia.title ? latestMedia.title : overlayState.title;
+    const authArtist = latestMedia.active && latestMedia.artist ? latestMedia.artist : overlayState.artist;
+    const isLoading = Boolean(overlayState.loading || serverLyricsState.fetching);
     const payload = [
-      `active=${overlayState.active ? 1 : 0}`,
-      `playing=${overlayState.playing ? 1 : 0}`,
-      `title=${cleanLine(overlayState.title)}`,
-      `artist=${cleanLine(overlayState.artist)}`,
+      `active=${authActive ? 1 : 0}`,
+      `playing=${authPlaying ? 1 : 0}`,
+      `loading=${isLoading ? 1 : 0}`,
+      `title=${cleanLine(authTitle)}`,
+      `artist=${cleanLine(authArtist)}`,
       `cover_version=${latestMedia.cover && latestMedia.coverVersion ? latestMedia.coverVersion : 0}`,
       `prev=${cleanLine(overlayState.prev)}`,
       `curr=${cleanLine(overlayState.curr)}`,
       `next=${cleanLine(overlayState.next)}`,
       `words=${wordsEncoded}`,
       `pos=${cleanLine(cfg.pos || 'top')}`,
+      `bar_w=${Math.round(Number(cfg.barWidth || 460))}`,
       `scale=${Number(cfg.scale || 1.15).toFixed(2)}`,
       `opacity=${Number(cfg.opacity ?? 0.95).toFixed(2)}`,
       `show_prev_next=${cfg.showPrevNext !== false ? 1 : 0}`,
+      `dof_blur=${cfg.dofBlur !== false ? 1 : 0}`,
+      `lyrics_style=${cleanLine(cfg.lyricsStyle || 'cinema')}`,
       `click_through=${cfg.clickThrough === true ? 1 : 0}`,
+      `show_bg=${cfg.showBg !== false ? 1 : 0}`,
+      `bg_color=${cleanLine(cfg.bgColor || '#0f1014')}`,
+      `bg_opacity=${Number(cfg.bgOpacity ?? 0.68).toFixed(2)}`,
+      `show_outline=${cfg.showOutline !== false ? 1 : 0}`,
+      `outline_color=${cleanLine(cfg.outlineColor || '#ffffff')}`,
+      `text_color=${cleanLine(cfg.textColor || '#ffffff')}`,
+      `active_color=${cleanLine(cfg.activeColor || '#7dd3fc')}`,
+      `text_shadow=${cfg.textShadow !== false ? 1 : 0}`,
+      `shadow_strength=${Number(cfg.shadowStrength ?? 0.65).toFixed(2)}`,
+      `text_glow=${cfg.textGlow === true ? 1 : 0}`,
+      `text_outline=${cfg.textOutline === true ? 1 : 0}`,
+      `show_controls=${cfg.showControls !== false ? 1 : 0}`,
+      `reset_pos_token=${Number(cfg.resetPosToken || 0)}`,
     ].join('\n');
     res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' });
     res.end(payload);

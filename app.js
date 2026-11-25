@@ -45,6 +45,7 @@
   const lyricsStatusBadge = document.getElementById('lyrics-status-badge');
   const lyricsQueryInput = document.getElementById('lyrics-query-input');
   const lyricsCandidateSelect = document.getElementById('lyrics-candidate-select');
+  const mediaScopeSelect = document.getElementById('media-scope-select');
   const lyricWordAnimToggle = document.getElementById('lyric-word-anim-toggle');
   const btnLyricsSearch = document.getElementById('btn-lyrics-search');
   const btnLyricsToggle = document.getElementById('btn-lyrics-toggle');
@@ -61,8 +62,19 @@
   const btnVisPower = document.getElementById('btn-vis-power');
   const visEnabledToggle = document.getElementById('vis-enabled-toggle');
   const overlayPosSelect = document.getElementById('overlay-pos-select');
+  const overlayStyleSelect = document.getElementById('overlay-style-select');
+  const overlayDofToggle = document.getElementById('overlay-dof-toggle');
   const overlayPrevNextToggle = document.getElementById('overlay-prevnext-toggle');
   const overlayClickThroughToggle = document.getElementById('overlay-clickthrough-toggle');
+  const overlayBgToggle = document.getElementById('overlay-bg-toggle');
+  const overlayOutlineToggle = document.getElementById('overlay-outline-toggle');
+  const overlayShadowToggle = document.getElementById('overlay-shadow-toggle');
+  const overlayControlsToggle = document.getElementById('overlay-controls-toggle');
+  const overlayBgColor = document.getElementById('overlay-bg-color');
+  const overlayOutlineColor = document.getElementById('overlay-outline-color');
+  const overlayTextColor = document.getElementById('overlay-text-color');
+  const overlayActiveColor = document.getElementById('overlay-active-color');
+  const btnOverlayResetPos = document.getElementById('btn-overlay-reset-pos');
   const ecoModeToggle = document.getElementById('eco-mode-toggle');
 
   // Source & Studio Buttons
@@ -174,8 +186,10 @@
     ['lg-bevel-slider', 'lg-bevel-num'],
     ['lyric-scale-slider', 'lyric-scale-num'],
     ['lyric-dof-slider', 'lyric-dof-num'],
+    ['overlay-width-slider', 'overlay-width-num'],
     ['overlay-scale-slider', 'overlay-scale-num'],
     ['overlay-opacity-slider', 'overlay-opacity-num'],
+    ['overlay-bg-opacity-slider', 'overlay-bg-opacity-num'],
     ['dpr-slider', 'dpr-num'],
   ];
 
@@ -316,6 +330,7 @@
   let lyricOffsetSec = 0;
   let lastCoverVersion = -1;
   let lyricsReqSeq = 0;
+  let isLyricsFetching = false;
   let lyricsCandidates = [];
   let skipLoadingTimer = null;
   let cachedLyricItems = [];
@@ -324,6 +339,8 @@
   let gameOverlayRunning = false;
   let visualizerEnabled = true;
   let visPausedByOverlay = false;
+  let appHibernated = document.hidden;
+  let overlayResetPosToken = 0;
   let liteTickerId = null;
   let lastOverlaySig = '';
   let lastOverlayPushMs = 0;
@@ -949,8 +966,10 @@
 
   async function fetchLyricsForTrack(title, artist, duration, forceFresh = false, album = '') {
     const reqId = ++lyricsReqSeq;
+    isLyricsFetching = true;
     lyricsStatusBadge.textContent = 'Mencari Better Lyrics...';
     lyricsQueryInput.value = title;
+    pushOverlayState(true);
     try {
       const freshParam = forceFresh ? '&fresh=1' : '';
       const albumParam = album ? `&album=${encodeURIComponent(album)}` : '';
@@ -958,6 +977,7 @@
       const res = await fetch(url, { cache: 'no-store' });
       const data = await res.json();
       if (reqId !== lyricsReqSeq) return;
+      isLyricsFetching = false;
 
       if (!data.found) {
         parsedLyrics = [];
@@ -973,7 +993,11 @@
       populateCandidateSelector(list);
       applyLyricsCandidate(list[0]);
     } catch (_) {
-      if (reqId === lyricsReqSeq) lyricsStatusBadge.textContent = 'Offline';
+      if (reqId === lyricsReqSeq) {
+        isLyricsFetching = false;
+        lyricsStatusBadge.textContent = 'Offline';
+        pushOverlayState(true);
+      }
     }
   }
 
@@ -1031,10 +1055,23 @@
   function buildOverlayConfigPayload() {
     return {
       pos: overlayPosSelect ? overlayPosSelect.value : 'top',
+      barWidth: getVal('overlay-width-num') || 460,
       scale: getVal('overlay-scale-num') || 1.15,
       opacity: getVal('overlay-opacity-num') || 0.95,
       showPrevNext: overlayPrevNextToggle ? overlayPrevNextToggle.checked : true,
+      dofBlur: overlayDofToggle ? overlayDofToggle.checked : true,
+      lyricsStyle: overlayStyleSelect ? overlayStyleSelect.value : 'cinema',
       clickThrough: overlayClickThroughToggle ? overlayClickThroughToggle.checked : false,
+      showBg: overlayBgToggle ? overlayBgToggle.checked : true,
+      bgColor: overlayBgColor ? overlayBgColor.value : '#0f1014',
+      bgOpacity: overlayBgToggle ? getVal('overlay-bg-opacity-num') : 0.68,
+      showOutline: overlayOutlineToggle ? overlayOutlineToggle.checked : true,
+      outlineColor: overlayOutlineColor ? overlayOutlineColor.value : '#ffffff',
+      textColor: overlayTextColor ? overlayTextColor.value : '#ffffff',
+      activeColor: overlayActiveColor ? overlayActiveColor.value : '#7dd3fc',
+      textShadow: overlayShadowToggle ? overlayShadowToggle.checked : true,
+      showControls: overlayControlsToggle ? overlayControlsToggle.checked : true,
+      resetPosToken: overlayResetPosToken,
     };
   }
 
@@ -1049,15 +1086,16 @@
       }
     }
     const prevText = lyricPrevEl.textContent || '';
-    const currText =
-      activeLyricIdx >= 0 && parsedLyrics[activeLyricIdx]
+    const currText = isLyricsFetching
+      ? 'Memuat lirik...'
+      : activeLyricIdx >= 0 && parsedLyrics[activeLyricIdx]
         ? parsedLyrics[activeLyricIdx].text
         : currentMedia.active
           ? currentMedia.title || '♪ ...'
           : '♪ Menunggu musik...';
-    const nextText = lyricNextEl.textContent || '';
+    const nextText = isLyricsFetching ? '' : lyricNextEl.textContent || '';
     const cfg = buildOverlayConfigPayload();
-    const sig = `${currentMedia.active ? 1 : 0}|${currentMedia.status}|${activeLyricIdx}|${activeWordIdx}|${currText}|${cfg.pos}|${cfg.scale}|${cfg.opacity}|${cfg.showPrevNext}|${cfg.clickThrough}`;
+    const sig = `${currentMedia.active ? 1 : 0}|${currentMedia.trackKey || ''}|${currentMedia.status}|${isLyricsFetching ? 1 : 0}|${activeLyricIdx}|${activeWordIdx}|${currText}|${JSON.stringify(cfg)}`;
     if (!force && sig === lastOverlaySig && nowMs - lastOverlayPushMs < 1100) return;
     lastOverlaySig = sig;
     lastOverlayPushMs = nowMs;
@@ -1068,12 +1106,14 @@
       body: JSON.stringify({
         active: currentMedia.active,
         playing: currentMedia.status === 'Playing',
+        loading: isLyricsFetching,
+        trackKey: currentMedia.trackKey || '',
         title: currentMedia.title || '',
         artist: currentMedia.artist || '',
-        prev: prevText,
+        prev: isLyricsFetching ? '' : prevText,
         curr: currText,
         next: nextText,
-        words: wordsPayload,
+        words: isLyricsFetching ? [] : wordsPayload,
         offsetSec: lyricOffsetSec,
         config: cfg,
       }),
@@ -1081,7 +1121,7 @@
   }
 
   function isVisualizerActive() {
-    return visualizerEnabled && !visPausedByOverlay && !isWebOverlayMode;
+    return visualizerEnabled && !visPausedByOverlay && !isWebOverlayMode && !appHibernated;
   }
 
   function drawLitePlaceholder(reasonText) {
@@ -1162,11 +1202,43 @@
     } catch (_) {}
   }
 
+  function syncMediaScopeOptions(sessions, currentScope) {
+    if (!mediaScopeSelect) return;
+    const prevVal = currentScope || mediaScopeSelect.value || 'music';
+    const sig = `${prevVal}|${(sessions || []).map((s) => `${s.appId}:${s.status}`).join(',')}`;
+    if (mediaScopeSelect.dataset.sig === sig) return;
+    mediaScopeSelect.dataset.sig = sig;
+
+    const existingCustom = new Set();
+    mediaScopeSelect.innerHTML = '';
+    const addOpt = (val, label) => {
+      const opt = document.createElement('option');
+      opt.value = val;
+      opt.textContent = label;
+      mediaScopeSelect.appendChild(opt);
+    };
+    addOpt('music', 'Fokus App Musik (Rekomendasi)');
+    addOpt('auto', 'Semua App (Auto)');
+    (sessions || []).forEach((s) => {
+      if (!s || !s.appId || existingCustom.has(s.appId)) return;
+      existingCustom.add(s.appId);
+      const stTag = s.status === 'Playing' ? '▶' : '⏸';
+      const titleHint = s.title ? ` — ${s.title.slice(0, 22)}` : '';
+      addOpt(s.appId, `Kunci: ${s.label || s.appId} (${stTag}${titleHint})`);
+    });
+    if (prevVal && prevVal !== 'music' && prevVal !== 'auto' && !existingCustom.has(prevVal)) {
+      addOpt(prevVal, `Kunci: ${prevVal} (Menunggu app...)`);
+    }
+    mediaScopeSelect.value = prevVal;
+  }
+
   async function pollMediaSession() {
+    if (appHibernated) return;
     try {
       const res = await fetch(`${BRIDGE_MEDIA_URL}/api/media`, { cache: 'no-store' });
       if (!res.ok) return;
       const data = await res.json();
+      syncMediaScopeOptions(data.sessions || [], data.scope);
       if (!data.active) {
         currentMedia.active = false;
         playerTitle.textContent = 'Tidak ada media aktif';
@@ -2192,11 +2264,24 @@
         lyricDof: getVal('lyric-dof-num'),
         lyricWordAnim: lyricWordAnimToggle.checked,
         lyricOffset: lyricOffsetSec,
+        mediaScope: mediaScopeSelect ? mediaScopeSelect.value : 'music',
         overlayPos: overlayPosSelect ? overlayPosSelect.value : 'top',
+        overlayWidth: getVal('overlay-width-num') || 460,
         overlayScale: getVal('overlay-scale-num') || 1.15,
         overlayOpacity: getVal('overlay-opacity-num') || 0.95,
+        overlayBgOpacity: getVal('overlay-bg-opacity-num'),
+        overlayBgColor: overlayBgColor ? overlayBgColor.value : '#0f1014',
+        overlayOutlineColor: overlayOutlineColor ? overlayOutlineColor.value : '#ffffff',
+        overlayTextColor: overlayTextColor ? overlayTextColor.value : '#ffffff',
+        overlayActiveColor: overlayActiveColor ? overlayActiveColor.value : '#7dd3fc',
+        overlayDofBlur: overlayDofToggle ? overlayDofToggle.checked : true,
+        overlayLyricsStyle: overlayStyleSelect ? overlayStyleSelect.value : 'cinema',
+        overlayShowBg: overlayBgToggle ? overlayBgToggle.checked : true,
+        overlayShowOutline: overlayOutlineToggle ? overlayOutlineToggle.checked : true,
+        overlayTextShadow: overlayShadowToggle ? overlayShadowToggle.checked : true,
+        overlayShowControls: overlayControlsToggle ? overlayControlsToggle.checked : true,
         overlayPrevNext: overlayPrevNextToggle ? overlayPrevNextToggle.checked : true,
-        overlayClickThrough: overlayClickThroughToggle ? overlayClickThroughToggle.checked : true,
+        overlayClickThrough: overlayClickThroughToggle ? overlayClickThroughToggle.checked : false,
         lgBlur: getVal('lg-blur-num'),
         lgRefract: getVal('lg-refract-num'),
         lgChroma: getVal('lg-chroma-num'),
@@ -2302,9 +2387,26 @@
         lyricOffsetSec = u.lyricOffset;
         lyricOffsetVal.textContent = `${lyricOffsetSec >= 0 ? '+' : ''}${lyricOffsetSec.toFixed(1)}s`;
       }
+      if (u.mediaScope && mediaScopeSelect) {
+        syncMediaScopeOptions([], u.mediaScope);
+        mediaScopeSelect.value = u.mediaScope;
+        fetch(`${BRIDGE_MEDIA_URL}/api/control?cmd=scope&val=${encodeURIComponent(u.mediaScope)}`).catch(() => {});
+      }
       if (u.overlayPos && overlayPosSelect) overlayPosSelect.value = u.overlayPos;
+      setPair('overlay-width-slider', 'overlay-width-num', u.overlayWidth);
       setPair('overlay-scale-slider', 'overlay-scale-num', u.overlayScale);
       setPair('overlay-opacity-slider', 'overlay-opacity-num', u.overlayOpacity);
+      setPair('overlay-bg-opacity-slider', 'overlay-bg-opacity-num', u.overlayBgOpacity);
+      if (u.overlayBgColor && overlayBgColor) overlayBgColor.value = u.overlayBgColor;
+      if (u.overlayOutlineColor && overlayOutlineColor) overlayOutlineColor.value = u.overlayOutlineColor;
+      if (u.overlayTextColor && overlayTextColor) overlayTextColor.value = u.overlayTextColor;
+      if (u.overlayActiveColor && overlayActiveColor) overlayActiveColor.value = u.overlayActiveColor;
+      if (u.overlayDofBlur !== undefined && overlayDofToggle) overlayDofToggle.checked = u.overlayDofBlur;
+      if (u.overlayLyricsStyle && overlayStyleSelect) overlayStyleSelect.value = u.overlayLyricsStyle;
+      if (u.overlayShowBg !== undefined && overlayBgToggle) overlayBgToggle.checked = u.overlayShowBg;
+      if (u.overlayShowOutline !== undefined && overlayOutlineToggle) overlayOutlineToggle.checked = u.overlayShowOutline;
+      if (u.overlayTextShadow !== undefined && overlayShadowToggle) overlayShadowToggle.checked = u.overlayTextShadow;
+      if (u.overlayShowControls !== undefined && overlayControlsToggle) overlayControlsToggle.checked = u.overlayShowControls;
       if (u.overlayPrevNext !== undefined && overlayPrevNextToggle) {
         overlayPrevNextToggle.checked = u.overlayPrevNext;
       }
@@ -2627,7 +2729,17 @@
       saveLastActiveState();
     });
   }
-  [overlayPosSelect, overlayPrevNextToggle, overlayClickThroughToggle].forEach((el) => {
+  [
+    overlayPosSelect,
+    overlayStyleSelect,
+    overlayDofToggle,
+    overlayPrevNextToggle,
+    overlayClickThroughToggle,
+    overlayBgToggle,
+    overlayOutlineToggle,
+    overlayShadowToggle,
+    overlayControlsToggle,
+  ].forEach((el) => {
     if (el) {
       el.addEventListener('change', () => {
         pushOverlayState(true);
@@ -2635,8 +2747,125 @@
       });
     }
   });
+  [overlayBgColor, overlayOutlineColor, overlayTextColor, overlayActiveColor].forEach((el) => {
+    if (el) {
+      el.addEventListener('input', () => {
+        pushOverlayState(true);
+        saveLastActiveState();
+      });
+    }
+  });
+  if (btnOverlayResetPos) {
+    btnOverlayResetPos.addEventListener('click', () => {
+      overlayResetPosToken += 1;
+      pushOverlayState(true);
+    });
+  }
+  const OVERLAY_STYLE_PRESETS = {
+    cinema: {
+      lyricsStyle: 'cinema',
+      dofBlur: true,
+      showBg: true,
+      bgColor: '#0f1014',
+      bgOpacity: 0.68,
+      showOutline: true,
+      outlineColor: '#ffffff',
+      textColor: '#ffffff',
+      activeColor: '#ffffff',
+      textShadow: true,
+      showControls: true,
+    },
+    glass: {
+      lyricsStyle: 'karaoke',
+      dofBlur: true,
+      showBg: true,
+      bgColor: '#0f1014',
+      bgOpacity: 0.68,
+      showOutline: true,
+      outlineColor: '#ffffff',
+      textColor: '#ffffff',
+      activeColor: '#7dd3fc',
+      textShadow: true,
+      showControls: true,
+    },
+    clean: {
+      lyricsStyle: 'cinema',
+      dofBlur: true,
+      showBg: false,
+      bgColor: '#0f1014',
+      bgOpacity: 0.0,
+      showOutline: false,
+      outlineColor: '#ffffff',
+      textColor: '#ffffff',
+      activeColor: '#ffffff',
+      textShadow: true,
+      showControls: true,
+    },
+    minimal: {
+      lyricsStyle: 'cinema',
+      dofBlur: true,
+      showBg: false,
+      bgColor: '#0f1014',
+      bgOpacity: 0.0,
+      showOutline: false,
+      outlineColor: '#ffffff',
+      textColor: '#ffffff',
+      activeColor: '#ffffff',
+      textShadow: true,
+      showControls: false,
+    },
+  };
+  document.querySelectorAll('.overlay-style-preset').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const p = OVERLAY_STYLE_PRESETS[btn.dataset.ovPreset];
+      if (!p) return;
+      if (overlayStyleSelect && p.lyricsStyle) overlayStyleSelect.value = p.lyricsStyle;
+      if (overlayDofToggle && p.dofBlur !== undefined) overlayDofToggle.checked = p.dofBlur;
+      if (overlayBgToggle) overlayBgToggle.checked = p.showBg;
+      if (overlayBgColor) overlayBgColor.value = p.bgColor;
+      setPair('overlay-bg-opacity-slider', 'overlay-bg-opacity-num', p.bgOpacity);
+      if (overlayOutlineToggle) overlayOutlineToggle.checked = p.showOutline;
+      if (overlayOutlineColor) overlayOutlineColor.value = p.outlineColor;
+      if (overlayTextColor) overlayTextColor.value = p.textColor;
+      if (overlayActiveColor) overlayActiveColor.value = p.activeColor;
+      if (overlayShadowToggle) overlayShadowToggle.checked = p.textShadow;
+      if (overlayControlsToggle) overlayControlsToggle.checked = p.showControls;
+      pushOverlayState(true);
+      saveLastActiveState();
+    });
+  });
+
+  // Hibernate Cobra Studio when window is minimized/hidden so overlay stays ultra-smooth
+  document.addEventListener('visibilitychange', () => {
+    appHibernated = document.hidden;
+    if (!appHibernated) {
+      pollMediaSession();
+      toggleGameOverlay('status');
+    }
+    updateVisualizerPowerState();
+  });
+  if (mediaScopeSelect) {
+    mediaScopeSelect.addEventListener('change', async () => {
+      const val = mediaScopeSelect.value || 'music';
+      saveLastActiveState();
+      await fetch(`${BRIDGE_MEDIA_URL}/api/control?cmd=scope&val=${encodeURIComponent(val)}`).catch(() => {});
+      setTimeout(pollMediaSession, 140);
+    });
+  }
   btnLyricsSettingsToggle.addEventListener('click', () => {
     lyricsControlsDrawer.classList.toggle('hidden');
+  });
+  document.querySelectorAll('.lyrics-drawer-tab').forEach((tabBtn) => {
+    tabBtn.addEventListener('click', () => {
+      const target = tabBtn.dataset.lyricsTab;
+      document.querySelectorAll('.lyrics-drawer-tab').forEach((b) => {
+        b.classList.toggle('active', b === tabBtn);
+      });
+      const appPane = document.getElementById('lyrics-tab-app');
+      const ovPane = document.getElementById('lyrics-tab-overlay');
+      if (appPane) appPane.classList.toggle('hidden', target !== 'app');
+      if (ovPane) ovPane.classList.toggle('hidden', target !== 'overlay');
+    });
   });
   btnLyricsRefresh.addEventListener('click', async () => {
     lyricsStatusBadge.textContent = 'Refreshing...';

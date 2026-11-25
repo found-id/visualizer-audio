@@ -396,8 +396,42 @@ body {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 55%;
+  max-height: 58%;
   overflow-y: auto;
+}
+
+.lyrics-drawer-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.lyrics-drawer-tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--ui-text-muted);
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 6px 8px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+
+.lyrics-drawer-tab.active {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.lyrics-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .icon-btn.overlay-active,
@@ -406,6 +440,59 @@ body {
   color: var(--ui-accent-text) !important;
   border-color: var(--ui-accent) !important;
   box-shadow: 0 0 14px rgba(99, 102, 241, 0.35);
+}
+
+.overlay-preset-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 5px;
+  margin-bottom: 4px;
+}
+
+.overlay-preset-row .btn-sm {
+  padding: 5px 6px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.overlay-color-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 2px 0 4px;
+}
+
+.overlay-color-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px;
+  padding: 4px 7px;
+  border-radius: 8px;
+  background: var(--ui-input-bg);
+  border: 1px solid var(--ui-border);
+  font-size: 11px;
+  color: var(--ui-muted);
+  cursor: pointer;
+}
+
+.overlay-color-chip input[type="color"] {
+  width: 20px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  cursor: pointer;
+}
+
+.shortcut-hint-pill {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--ui-input-bg);
+  border: 1px solid var(--ui-border);
+  color: var(--ui-muted);
+  font-size: 11px;
+  text-align: center;
 }
 
 /* Transparent Web/OBS Overlay Mode (?overlay=1) */

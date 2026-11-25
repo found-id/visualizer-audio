@@ -53,69 +53,138 @@
     </div>
 
     <div id="lyrics-controls-drawer" class="lyrics-controls-drawer hidden">
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="lyrics-candidate-select">Sumber / Versi Lirik (Better Lyrics Engine)</label>
-        </div>
-        <select id="lyrics-candidate-select" class="select-input full-width">
-          <option value="">Otomatis (Skor Tertinggi)</option>
-        </select>
+      <div class="lyrics-drawer-tabs">
+        <button type="button" class="lyrics-drawer-tab active" data-lyrics-tab="app">Lirik App</button>
+        <button type="button" class="lyrics-drawer-tab" data-lyrics-tab="overlay">Game Overlay</button>
       </div>
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="lyric-scale-slider">Scale Text Lirik</label>
-          <input id="lyric-scale-num" class="num-input" type="number" min="0.7" max="2.0" step="0.05" value="1.05">
+
+      <div id="lyrics-tab-app" class="lyrics-tab-pane">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="media-scope-select">Fokus Sumber Media (Anti Salah Deteksi)</label>
+          </div>
+          <select id="media-scope-select" class="select-input full-width">
+            <option value="music" selected>Fokus App Musik (Rekomendasi)</option>
+            <option value="auto">Semua App (Auto)</option>
+          </select>
         </div>
-        <input id="lyric-scale-slider" type="range" min="0.7" max="1.8" step="0.05" value="1.05">
-      </div>
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="lyric-dof-slider">Intensitas Blur DOF</label>
-          <input id="lyric-dof-num" class="num-input" type="number" min="0" max="3.0" step="0.1" value="1.0">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="lyrics-candidate-select">Sumber / Versi Lirik (Better Lyrics Engine)</label>
+          </div>
+          <select id="lyrics-candidate-select" class="select-input full-width">
+            <option value="">Otomatis (Skor Tertinggi)</option>
+          </select>
         </div>
-        <input id="lyric-dof-slider" type="range" min="0" max="2.5" step="0.1" value="1.0">
-      </div>
-      <div class="lyric-offset-bar">
-        <label class="inline-check">
-          <input id="lyric-word-anim-toggle" type="checkbox" checked>
-          <span>Animasi Per Kata</span>
-        </label>
-        <div class="header-actions">
-          <button id="btn-lyric-offset-minus" class="icon-btn" title="Majukan Lirik -0.5s">-0.5s</button>
-          <span id="lyric-offset-val" class="freq-readout">0.0s</span>
-          <button id="btn-lyric-offset-plus" class="icon-btn" title="Mundurkan Lirik +0.5s">+0.5s</button>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="lyric-scale-slider">Scale Text Lirik</label>
+            <input id="lyric-scale-num" class="num-input" type="number" min="0.7" max="2.0" step="0.05" value="1.05">
+          </div>
+          <input id="lyric-scale-slider" type="range" min="0.7" max="1.8" step="0.05" value="1.05">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="lyric-dof-slider">Intensitas Blur DOF (App)</label>
+            <input id="lyric-dof-num" class="num-input" type="number" min="0" max="3.0" step="0.1" value="1.0">
+          </div>
+          <input id="lyric-dof-slider" type="range" min="0" max="2.5" step="0.1" value="1.0">
+        </div>
+        <div class="lyric-offset-bar">
+          <label class="inline-check">
+            <input id="lyric-word-anim-toggle" type="checkbox" checked>
+            <span>Animasi Per Kata</span>
+          </label>
+          <div class="header-actions">
+            <button id="btn-lyric-offset-minus" class="icon-btn" title="Majukan Lirik -0.5s">-0.5s</button>
+            <span id="lyric-offset-val" class="freq-readout">0.0s</span>
+            <button id="btn-lyric-offset-plus" class="icon-btn" title="Mundurkan Lirik +0.5s">+0.5s</button>
+          </div>
         </div>
       </div>
 
-      <div class="divider"></div>
-      <div class="section-label">Game Overlay (Transparan Tanpa Background)</div>
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="overlay-pos-select">Posisi Overlay</label>
-          <select id="overlay-pos-select" class="select-input compact-select">
-            <option value="top" selected>Atas (Top)</option>
-            <option value="bottom">Bawah (Bottom)</option>
-            <option value="center">Tengah (Center)</option>
-          </select>
+      <div id="lyrics-tab-overlay" class="lyrics-tab-pane hidden">
+        <div class="overlay-preset-row">
+          <button type="button" class="btn btn-secondary btn-sm overlay-style-preset" data-ov-preset="cinema">Cinema DOF</button>
+          <button type="button" class="btn btn-secondary btn-sm overlay-style-preset" data-ov-preset="glass">Dark Glass</button>
+          <button type="button" class="btn btn-secondary btn-sm overlay-style-preset" data-ov-preset="clean">Transparan</button>
+          <button type="button" class="btn btn-secondary btn-sm overlay-style-preset" data-ov-preset="minimal">Minimal</button>
         </div>
-      </div>
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="overlay-scale-slider">Ukuran Teks Overlay</label>
-          <input id="overlay-scale-num" class="num-input" type="number" min="0.7" max="2.2" step="0.05" value="1.15">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-pos-select">Posisi Overlay</label>
+            <div class="header-actions">
+              <select id="overlay-pos-select" class="select-input compact-select">
+                <option value="top" selected>Atas (Top)</option>
+                <option value="bottom">Bawah (Bottom)</option>
+                <option value="center">Tengah (Center)</option>
+              </select>
+              <button id="btn-overlay-reset-pos" type="button" class="icon-btn" title="Reset posisi drag ke tengah">⌖</button>
+            </div>
+          </div>
         </div>
-        <input id="overlay-scale-slider" type="range" min="0.7" max="2.2" step="0.05" value="1.15">
-      </div>
-      <div class="setting-row">
-        <div class="setting-head">
-          <label for="overlay-opacity-slider">Opasitas Teks Overlay</label>
-          <input id="overlay-opacity-num" class="num-input" type="number" min="0.3" max="1.0" step="0.05" value="0.95">
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-style-select">Style Lirik Overlay</label>
+            <select id="overlay-style-select" class="select-input compact-select">
+              <option value="cinema" selected>Cinema White (DOF)</option>
+              <option value="karaoke">Karaoke Accent</option>
+            </select>
+          </div>
         </div>
-        <input id="overlay-opacity-slider" type="range" min="0.3" max="1.0" step="0.05" value="0.95">
-      </div>
-      <div class="toggle-grid">
-        <label class="toggle-card"><input id="overlay-prevnext-toggle" type="checkbox" checked><span>Baris Prev/Next</span></label>
-        <label class="toggle-card"><input id="overlay-clickthrough-toggle" type="checkbox"><span>Tembus Klik Game</span></label>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-width-slider">Lebar Bar Overlay (px)</label>
+            <input id="overlay-width-num" class="num-input" type="number" min="320" max="760" step="10" value="460">
+          </div>
+          <input id="overlay-width-slider" type="range" min="320" max="760" step="10" value="460">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-scale-slider">Ukuran Teks Overlay</label>
+            <input id="overlay-scale-num" class="num-input" type="number" min="0.7" max="2.2" step="0.05" value="1.15">
+          </div>
+          <input id="overlay-scale-slider" type="range" min="0.7" max="2.2" step="0.05" value="1.15">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-opacity-slider">Opasitas Keseluruhan</label>
+            <input id="overlay-opacity-num" class="num-input" type="number" min="0.25" max="1.0" step="0.05" value="0.95">
+          </div>
+          <input id="overlay-opacity-slider" type="range" min="0.25" max="1.0" step="0.05" value="0.95">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-bg-opacity-slider">Opasitas Background</label>
+            <input id="overlay-bg-opacity-num" class="num-input" type="number" min="0.0" max="1.0" step="0.05" value="0.68">
+          </div>
+          <input id="overlay-bg-opacity-slider" type="range" min="0.0" max="1.0" step="0.05" value="0.68">
+        </div>
+        <div class="setting-row">
+          <div class="setting-head">
+            <label for="overlay-shadow-strength-slider">Intensitas Shadow Lirik</label>
+            <input id="overlay-shadow-strength-num" class="num-input" type="number" min="0.0" max="1.0" step="0.05" value="0.65">
+          </div>
+          <input id="overlay-shadow-strength-slider" type="range" min="0.0" max="1.0" step="0.05" value="0.65">
+        </div>
+        <div class="overlay-color-grid">
+          <label class="overlay-color-chip"><span>BG</span><input id="overlay-bg-color" type="color" value="#0f1014"></label>
+          <label class="overlay-color-chip"><span>Outline</span><input id="overlay-outline-color" type="color" value="#ffffff"></label>
+          <label class="overlay-color-chip"><span>Teks</span><input id="overlay-text-color" type="color" value="#ffffff"></label>
+          <label class="overlay-color-chip"><span>Aktif</span><input id="overlay-active-color" type="color" value="#7dd3fc"></label>
+        </div>
+        <div class="toggle-grid">
+          <label class="toggle-card"><input id="overlay-dof-toggle" type="checkbox" checked><span>DOF Blur Lirik</span></label>
+          <label class="toggle-card"><input id="overlay-glow-toggle" type="checkbox"><span>Glow Teks</span></label>
+          <label class="toggle-card"><input id="overlay-text-outline-toggle" type="checkbox"><span>Outline Teks</span></label>
+          <label class="toggle-card"><input id="overlay-shadow-toggle" type="checkbox" checked><span>Shadow Teks</span></label>
+          <label class="toggle-card"><input id="overlay-bg-toggle" type="checkbox" checked><span>Background Bar</span></label>
+          <label class="toggle-card"><input id="overlay-outline-toggle" type="checkbox" checked><span>Outline Bar</span></label>
+          <label class="toggle-card"><input id="overlay-controls-toggle" type="checkbox" checked><span>Control Bar</span></label>
+          <label class="toggle-card"><input id="overlay-prevnext-toggle" type="checkbox" checked><span>Baris Prev/Next</span></label>
+          <label class="toggle-card"><input id="overlay-clickthrough-toggle" type="checkbox"><span>Tembus Klik Game</span></label>
+        </div>
+        <div class="shortcut-hint-pill">Shortcut: <b>G</b> Toggle Overlay • <b>Alt+O</b> / <b>Ctrl+Shift+L</b> Hide/Show Global</div>
       </div>
     </div>
 
@@ -699,7 +768,7 @@
       </select>
 
       <button id="btn-vis-power" class="btn btn-secondary btn-sm overlay-active" title="Matikan / Nyalakan Visualizer agar Laptop Ringan (V)">Vis</button>
-      <button id="btn-hud-overlay" class="btn btn-secondary btn-sm" title="Game Lyrics Overlay Transparan (G)">Overlay</button>
+      <button id="btn-hud-overlay" class="btn btn-secondary btn-sm" title="Game Lyrics Overlay Transparan (G)">Overlay (G)</button>
       <button id="btn-lyrics-toggle" class="btn btn-secondary btn-sm" title="Panel Lirik (L)">Lirik (L)</button>
       <button id="btn-toggle-panel" class="btn btn-primary btn-sm" title="Pengaturan Studio (S)">Studio (S)</button>
       <button id="btn-fullscreen" class="icon-btn" title="Fullscreen (F)">⛶</button>
